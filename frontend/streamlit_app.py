@@ -62,10 +62,21 @@ def build_map(raw_contours: list[dict[str, Any]], result: dict[str, Any]) -> fol
     contour_group.add_to(fmap)
     pond_group = folium.FeatureGroup(name="Suggested ponds", show=True)
     bounds = []
-    for cand in candidates:
+
+    ordered_candidates = (
+        [c for c in candidates if not c["recommended"]]
+        + [c for c in candidates if c["recommended"]]
+    )
+
+    for cand in ordered_candidates:
         is_best = cand["recommended"]
         color = candidate_color(cand)
-        boundary_latlon = [(lat, lon) for lon, lat in cand["basinBoundary"]["coordinates"][0]]
+
+        boundary_latlon = [
+            (lat, lon)
+            for lon, lat in cand["basinBoundary"]["coordinates"][0]
+        ]
+
         bounds.extend(boundary_latlon)
 
         folium.Polygon(
@@ -75,20 +86,34 @@ def build_map(raw_contours: list[dict[str, Any]], result: dict[str, Any]) -> fol
             fill=True,
             fill_color=color,
             fill_opacity=0.32 if is_best else 0.18,
-            tooltip=("Recommended pond" if is_best else f'Alternative #{cand["rank"]}'),
+            tooltip=(
+                "Recommended pond"
+                if is_best
+                else f"Alternative #{cand['rank']}"
+            ),
         ).add_to(pond_group)
 
         popup_html = f"""
-            <b>{'Recommended pond' if is_best else 'Alternative pond #' + str(cand['rank'])}</b><br>
+            <b>
+                {'Recommended pond'
+                if is_best
+                else 'Alternative pond #' + str(cand['rank'])}
+            </b><br>
             Elevation: {cand['pondElevation']:.1f} m<br>
             Basin area: {cand['basinAreaSqM']:,.0f} m²<br>
             Catchment area: {cand['estimatedCatchmentAreaHectares']:.2f} ha<br>
             Basin depth: {cand['basinDepthM']:.1f} m<br>
             Estimated volume: {cand['estimatedVolumeM3']:,.0f} m³<br>
-            Compactness: {cand['compactnessScore']:.2f}
+            Compactness: {cand['compactnessScore']:.2f}<br>
+            Latitude: {cand['pondCentroid']['lat']}<br>
+            Longitude: {cand['pondCentroid']['lon']}<br>
         """
+
         folium.CircleMarker(
-            location=(cand["pondCentroid"]["lat"], cand["pondCentroid"]["lon"]),
+            location=(
+                cand["pondCentroid"]["lat"],
+                cand["pondCentroid"]["lon"]
+            ),
             radius=8 if is_best else 6,
             color="white",
             weight=2,
@@ -129,6 +154,8 @@ def pond_table_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
                 "Catchment (ha)": c["estimatedCatchmentAreaHectares"],
                 "Compactness": c["compactnessScore"],
                 "Score": c["score"],
+                "Latitude":c["pondCentroid"]["lat"],
+                "Longitude":c["pondCentroid"]["lon"]
             }
         )
     return rows
