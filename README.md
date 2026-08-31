@@ -64,8 +64,15 @@ streamlit run frontend/streamlit_app.py
 
 Returns the complete analysis result, including the recommended pond, alternative candidates, pond boundary, terrain summary, and watershed metrics.
 
+for local testing
+
 ```bash
 curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
+```
+for testing on server
+
+```bash
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "file=@contours_1m.kml"
 ```
 
 ### 2) Summary endpoint
@@ -74,8 +81,16 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.km
 
 Returns a compact version with the main results only.
 
+for local testing
+
 ```bash
 curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" -F "file=@contours_1m.kml"
+```
+
+for testing on server
+
+```bash
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/summary" -F "file=@contours_1m.kml"
 ```
 
 ### 3) Candidate endpoint
@@ -84,9 +99,18 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" -F "file=@contou
 
 Returns the recommended site and alternative pond candidates only.
 
+for local testing
+
 ```bash
 curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" -F "file=@contours_1m.kml"
 ```
+
+for testing on server
+
+```bash
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/candidates" -F "file=@contours_1m.kml"
+```
+
 
 ### 4) Raw contours endpoint
 
@@ -94,8 +118,16 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" -F "file=@con
 
 Returns raw parsed contour lines without analysis, useful for map rendering or inspection.
 
+for local testing
+
 ```bash
 curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/raw" -F "file=@contours_1m.kml"
+```
+
+for testing on server
+
+```bash
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/raw" -F "file=@contours_1m.kml"
 ```
 
 ### Legacy compatibility endpoint
@@ -157,6 +189,14 @@ The backend was split into smaller modules to improve readability, reusability, 
 
 ## Quick example
 
+for local testing
+
 ```bash
-curl -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
+```
+
+for testing on server
+
+```bash
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "file=@contours_1m.kml"
 ```
