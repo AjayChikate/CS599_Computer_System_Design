@@ -65,7 +65,7 @@ streamlit run frontend/streamlit_app.py
 Returns the complete analysis result, including the recommended pond, alternative candidates, pond boundary, terrain summary, and watershed metrics.
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" \ -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
 ```
 
 ### 2) Summary endpoint
@@ -75,7 +75,7 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" \ -F "file=@contours_1m.
 Returns a compact version with the main results only.
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" \ -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" -F "file=@contours_1m.kml"
 ```
 
 ### 3) Candidate endpoint
@@ -85,7 +85,7 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" \ -F "file=@cont
 Returns the recommended site and alternative pond candidates only.
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" \ -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" -F "file=@contours_1m.kml"
 ```
 
 ### 4) Raw contours endpoint
@@ -95,7 +95,7 @@ curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" \ -F "file=@c
 Returns raw parsed contour lines without analysis, useful for map rendering or inspection.
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/raw" \ -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/raw" -F "file=@contours_1m.kml"
 ```
 
 ### Legacy compatibility endpoint
