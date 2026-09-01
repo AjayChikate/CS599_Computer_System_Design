@@ -52,9 +52,9 @@ def read_root() -> dict[str, Any]:
 
 @app.post("/analyzeContour")
 @app.post("/findCatchment")
-async def analyze_contour(file: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour(contour_map: UploadFile = File(...)) -> JSONResponse:
     try:
-        analysis = await _run_analysis(file)
+        analysis = await _run_analysis(contour_map)
         return JSONResponse(status_code=200, content=analysis)
     except ValueError as exc:
         return _error_response(400, str(exc))
@@ -63,9 +63,9 @@ async def analyze_contour(file: UploadFile = File(...)) -> JSONResponse:
 
 
 @app.post("/analyzeContour/summary")
-async def analyze_contour_summary(file: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_summary(contour_map: UploadFile = File(...)) -> JSONResponse:
     try:
-        analysis = await _run_analysis(file)
+        analysis = await _run_analysis(contour_map)
         summary = {
             "status": analysis["status"],
             "pondElevation": analysis["pondElevation"],
@@ -86,9 +86,9 @@ async def analyze_contour_summary(file: UploadFile = File(...)) -> JSONResponse:
 
 
 @app.post("/analyzeContour/candidates")
-async def analyze_contour_candidates(file: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_candidates(contour_map: UploadFile = File(...)) -> JSONResponse:
     try:
-        analysis = await _run_analysis(file)
+        analysis = await _run_analysis(contour_map)
         payload = {
             "status": analysis["status"],
             "recommended": analysis["pondCandidates"][0],
@@ -103,12 +103,12 @@ async def analyze_contour_candidates(file: UploadFile = File(...)) -> JSONRespon
 
 
 @app.post("/analyzeContour/raw")
-async def analyze_contour_raw(file: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_raw(contour_map: UploadFile = File(...)) -> JSONResponse:
     try:
-        if not file.filename:
+        if not contour_map.filename:
             raise ValueError("A file upload is required.")
-        contents = await file.read()
-        contours = load_raw_contours(contents, file.filename)
+        contents = await contour_map.read()
+        contours = load_raw_contours(contents, contour_map.filename)
         return JSONResponse(
             status_code=200,
             content={

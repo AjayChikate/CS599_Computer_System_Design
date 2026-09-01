@@ -67,12 +67,12 @@ Returns the complete analysis result, including the recommended pond, alternativ
 for local testing
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "contour_map=@contours_1m.kml"
 ```
 for testing on server
 
 ```bash
-curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "contour_map=@contours_1m.kml"
 ```
 
 ### 2) Summary endpoint
@@ -84,13 +84,13 @@ Returns a compact version with the main results only.
 for local testing
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/summary" -F "contour_map=@contours_1m.kml"
 ```
 
 for testing on server
 
 ```bash
-curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/summary" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/summary" -F "contour_map=@contours_1m.kml"
 ```
 
 ### 3) Candidate endpoint
@@ -102,13 +102,13 @@ Returns the recommended site and alternative pond candidates only.
 for local testing
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/candidates" -F "contour_map=@contours_1m.kml"
 ```
 
 for testing on server
 
 ```bash
-curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/candidates" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/candidates" -F "contour_map=@contours_1m.kml"
 ```
 
 
@@ -121,13 +121,13 @@ Returns raw parsed contour lines without analysis, useful for map rendering or i
 for local testing
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/raw" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour/raw" -F "contour_map=@contours_1m.kml"
 ```
 
 for testing on server
 
 ```bash
-curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/raw" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour/raw" -F "contour_map=@contours_1m.kml"
 ```
 
 ### Legacy compatibility endpoint
@@ -192,11 +192,13 @@ The backend was split into smaller modules to improve readability, reusability, 
 for local testing
 
 ```bash
-curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://127.0.0.1:8000/analyzeContour" -F "contour_map=@contours_1m.kml"
 ```
 
 for testing on server
 
 ```bash
-curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "file=@contours_1m.kml"
+curl.exe -X POST "http://10.1.75.51:4297/analyzeContour" -F "contour_map=@contours_1m.kml"
 ```
+
+
