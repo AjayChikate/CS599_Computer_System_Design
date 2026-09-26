@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 try:
+    from .config import MAX_UPLOAD_BYTES
     from .service import analyze_contour_map, load_raw_contours
 except ImportError: 
+    from config import MAX_UPLOAD_BYTES
     from service import analyze_contour_map, load_raw_contours
 
 app = FastAPI(
@@ -28,11 +30,14 @@ def _error_response(status_code: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"error": message})
 
 
-async def _run_analysis(file: UploadFile) -> dict[str, Any]:
-    if not file.filename:
+async def _run_analysis(contour_map: UploadFile | None, file: UploadFile | None = None) -> dict[str, Any]:
+    upload = contour_map or file
+    if upload is None or not upload.filename:
         raise ValueError("A file upload is required.")
-    contents = await file.read()
-    return analyze_contour_map(contents, file.filename)
+    contents = await upload.read(MAX_UPLOAD_BYTES + 1)
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise ValueError("Upload is too large. The maximum supported file size is 25 MB.")
+    return analyze_contour_map(contents, upload.filename)
 
 
 @app.get("/")
@@ -52,9 +57,11 @@ def read_root() -> dict[str, Any]:
 
 @app.post("/analyzeContour")
 @app.post("/findCatchment")
-async def analyze_contour(contour_map: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour(
+    contour_map: UploadFile | None = File(None), file: UploadFile | None = File(None)
+) -> JSONResponse:
     try:
-        analysis = await _run_analysis(contour_map)
+        analysis = await _run_analysis(contour_map, file)
         return JSONResponse(status_code=200, content=analysis)
     except ValueError as exc:
         return _error_response(400, str(exc))
@@ -63,9 +70,11 @@ async def analyze_contour(contour_map: UploadFile = File(...)) -> JSONResponse:
 
 
 @app.post("/analyzeContour/summary")
-async def analyze_contour_summary(contour_map: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_summary(
+    contour_map: UploadFile | None = File(None), file: UploadFile | None = File(None)
+) -> JSONResponse:
     try:
-        analysis = await _run_analysis(contour_map)
+        analysis = await _run_analysis(contour_map, file)
         summary = {
             "status": analysis["status"],
             "pondElevation": analysis["pondElevation"],
@@ -86,9 +95,11 @@ async def analyze_contour_summary(contour_map: UploadFile = File(...)) -> JSONRe
 
 
 @app.post("/analyzeContour/candidates")
-async def analyze_contour_candidates(contour_map: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_candidates(
+    contour_map: UploadFile | None = File(None), file: UploadFile | None = File(None)
+) -> JSONResponse:
     try:
-        analysis = await _run_analysis(contour_map)
+        analysis = await _run_analysis(contour_map, file)
         payload = {
             "status": analysis["status"],
             "recommended": analysis["pondCandidates"][0],
@@ -103,12 +114,17 @@ async def analyze_contour_candidates(contour_map: UploadFile = File(...)) -> JSO
 
 
 @app.post("/analyzeContour/raw")
-async def analyze_contour_raw(contour_map: UploadFile = File(...)) -> JSONResponse:
+async def analyze_contour_raw(
+    contour_map: UploadFile | None = File(None), file: UploadFile | None = File(None)
+) -> JSONResponse:
     try:
-        if not contour_map.filename:
+        upload = contour_map or file
+        if upload is None or not upload.filename:
             raise ValueError("A file upload is required.")
-        contents = await contour_map.read()
-        contours = load_raw_contours(contents, contour_map.filename)
+        contents = await upload.read(MAX_UPLOAD_BYTES + 1)
+        if len(contents) > MAX_UPLOAD_BYTES:
+            raise ValueError("Upload is too large. The maximum supported file size is 25 MB.")
+        contours = load_raw_contours(contents, upload.filename)
         return JSONResponse(
             status_code=200,
             content={

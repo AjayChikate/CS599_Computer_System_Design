@@ -113,8 +113,26 @@ def _score_candidates(candidates: List[BasinCandidate]) -> List[Tuple[float, Bas
     return scored
 
 
-def analyze_contour_map(file_bytes: bytes, filename: str) -> dict[str, Any]:
-    raw_contours = load_raw_contours(file_bytes, filename)
+def _point_on_segment(point: Tuple[float, float], start: Tuple[float, float], end: Tuple[float, float]) -> bool:
+    x, y = point
+    x1, y1 = start
+    x2, y2 = end
+    epsilon = 1e-10
+    cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+    return (
+        abs(cross) <= epsilon
+        and min(x1, x2) - epsilon <= x <= max(x1, x2) + epsilon
+        and min(y1, y2) - epsilon <= y <= max(y1, y2) + epsilon
+    )
+
+
+def _inside_or_on_boundary(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
+    if any(_point_on_segment(point, polygon[index], polygon[index + 1]) for index in range(len(polygon) - 1)):
+        return True
+    return point_in_polygon(point, polygon)
+
+
+def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
     if not raw_contours:
         raise ValueError("No contour lines were found in the uploaded file.")
 
@@ -268,3 +286,43 @@ def analyze_contour_map(file_bytes: bytes, filename: str) -> dict[str, Any]:
         "pondCandidates": pond_candidates,
         "alternativeCandidates": alternatives,
     }
+
+
+def analyze_contours_in_area(
+    raw_contours: List[dict[str, Any]], area_polygon: List[Tuple[float, float]]
+) -> dict[str, Any]:
+    if len(area_polygon) < 4 or area_polygon[0] != area_polygon[-1]:
+        raise ValueError("Draw a closed polygon around the land area to analyze.")
+
+    area_bounds = (
+        min(point[0] for point in area_polygon),
+        min(point[1] for point in area_polygon),
+        max(point[0] for point in area_polygon),
+        max(point[1] for point in area_polygon),
+    )
+    selected_contours = []
+    for contour in raw_contours:
+        points = contour["points"]
+        contour_bounds = (
+            min(point[0] for point in points),
+            min(point[1] for point in points),
+            max(point[0] for point in points),
+            max(point[1] for point in points),
+        )
+        if (
+            contour_bounds[0] < area_bounds[0]
+            or contour_bounds[1] < area_bounds[1]
+            or contour_bounds[2] > area_bounds[2]
+            or contour_bounds[3] > area_bounds[3]
+        ):
+            continue
+        if all(_inside_or_on_boundary(point, area_polygon) for point in points):
+            selected_contours.append(contour)
+
+    if not selected_contours:
+        raise ValueError("No complete contour rings fit inside the selected land area.")
+    return analyze_contours(selected_contours)
+
+
+def analyze_contour_map(file_bytes: bytes, filename: str) -> dict[str, Any]:
+    return analyze_contours(load_raw_contours(file_bytes, filename))

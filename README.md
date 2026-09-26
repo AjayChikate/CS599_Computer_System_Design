@@ -144,13 +144,16 @@ Run the Streamlit dashboard:
 streamlit run frontend/streamlit_app.py
 ```
 
-Then upload a `.kml` or `.kmz` contour file in the UI. The app displays:
+Then upload a `.kml` or `.kmz` contour file (up to 25 MB). Draw a polygon on the map to select the land area to analyze. You can edit or clear the selection. The analysis uses complete contour rings inside the polygon; enlarge the selection if it cuts through a ring. The app displays:
 
 - contour lines on a map
-- suggested pond location(s)
+- selected land area and suggested pond location(s)
+- catchment boundaries and estimated catchment areas
+- estimated pond storage volume
 - terrain metrics
-- basin depth and catchment area
 - a downloadable JSON result
+
+The volume is an estimate of pond storage capacity derived from contour geometry, not a rainfall-based water-yield forecast. Actual collected water depends on rainfall, runoff, infiltration, and pond design.
 
 ## API response overview
 
@@ -184,7 +187,7 @@ The backend was split into smaller modules to improve readability, reusability, 
 
 ## Notes
 
-- The app uploads only `.kml` and `.kmz` files.
+- The app accepts `.kml` and `.kmz` files up to 25 MB. Contours are simplified only for map display; analysis uses the original coordinates and caches parsed contours and recent selection results.
 - River-like elongated contour loops are filtered out to avoid false pond suggestions.
 
 ## Quick example

@@ -1,230 +1,323 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
 
 import folium
 import streamlit as st
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from backend import analyze_contour_map, load_raw_contours
+from backend import analyze_contours_in_area, load_raw_contours
+from backend.config import MAX_UPLOAD_BYTES
 
 st.set_page_config(page_title="Contour & Catchment", layout="wide")
 
-RECOMMENDED_COLOR = "#2563EB"   # blue
-ALTERNATIVE_COLORS = [
-    "#B9622C",  # clay
-    "#7B5EA7",  # purple
-    "#C9A227",  # gold
-    "#3F7D5C",  # green
-    "#A3352B",  # brick red
-    "#4F8FB0",  # steel blue
-    "#8A6D3B",  # bronze
-]
+RECOMMENDED_COLOR = "#2563EB"
+ALTERNATIVE_COLORS = ["#B9622C", "#7B5EA7", "#C9A227", "#3F7D5C", "#A3352B", "#4F8FB0", "#8A6D3B"]
+MAX_DISPLAY_POINTS_PER_CONTOUR = 400
 
 
-def candidate_color(cand: dict[str, Any]) -> str:
-    if cand["recommended"]:
+@st.cache_data(ttl=3600, max_entries=2, show_spinner=False)
+def cached_raw_contours(file_bytes: bytes, filename: str) -> list[dict[str, Any]]:
+    return load_raw_contours(file_bytes, filename)
+
+
+@st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
+def cached_area_analysis(file_bytes: bytes, filename: str, area_json: str) -> dict[str, Any]:
+    area = [tuple(point) for point in json.loads(area_json)]
+    return analyze_contours_in_area(cached_raw_contours(file_bytes, filename), area)
+
+
+def candidate_color(candidate: dict[str, Any]) -> str:
+    if candidate["recommended"]:
         return RECOMMENDED_COLOR
-    return ALTERNATIVE_COLORS[(cand["rank"] - 2) % len(ALTERNATIVE_COLORS)]
+    return ALTERNATIVE_COLORS[(candidate["rank"] - 2) % len(ALTERNATIVE_COLORS)]
 
 
-def elevation_color(elevation: float, min_e: float, max_e: float) -> str:
-    t = (elevation - min_e) / (max_e - min_e) if max_e > min_e else 0.5
-    r = round(47 + t * (185 - 47))
-    g = round(111 + t * (98 - 111))
-    b = round(94 + t * (44 - 94))
-    return f"rgb({r},{g},{b})"
+def elevation_color(elevation: float, min_elevation: float, max_elevation: float) -> str:
+    t = (elevation - min_elevation) / (max_elevation - min_elevation) if max_elevation > min_elevation else 0.5
+    red = round(47 + t * (185 - 47))
+    green = round(111 + t * (98 - 111))
+    blue = round(94 + t * (44 - 94))
+    return f"rgb({red},{green},{blue})"
 
 
-def build_map(raw_contours: list[dict[str, Any]], result: dict[str, Any]) -> folium.Map:
-    candidates = result["pondCandidates"]
-    center_lat = result["pondCentroid"]["lat"]
-    center_lon = result["pondCentroid"]["lon"]
-    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=16, tiles="OpenStreetMap")
-    elevations = [c["elevation"] for c in raw_contours]
-    min_e, max_e = (min(elevations), max(elevations)) if elevations else (0.0, 1.0)
+def coordinate_bounds(points: list[tuple[float, float]]) -> list[list[float]]:
+    longitudes = [point[0] for point in points]
+    latitudes = [point[1] for point in points]
+    return [[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]]
+
+
+def contour_bounds(contours: list[dict[str, Any]]) -> list[list[float]]:
+    min_lon = min(point[0] for contour in contours for point in contour["points"])
+    max_lon = max(point[0] for contour in contours for point in contour["points"])
+    min_lat = min(point[1] for contour in contours for point in contour["points"])
+    max_lat = max(point[1] for contour in contours for point in contour["points"])
+    return [[min_lat, min_lon], [max_lat, max_lon]]
+
+
+def build_map(
+    raw_contours: list[dict[str, Any]],
+    result: dict[str, Any] | None = None,
+    selected_area: list[tuple[float, float]] | None = None,
+) -> folium.Map:
+    bounds = coordinate_bounds(selected_area) if selected_area else contour_bounds(raw_contours)
+    center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2]
+    fmap = folium.Map(location=center, zoom_start=15, tiles="OpenStreetMap", control_scale=True)
+
+    elevations = [contour["elevation"] for contour in raw_contours]
+    min_elevation, max_elevation = (min(elevations), max(elevations)) if elevations else (0.0, 1.0)
     contour_group = folium.FeatureGroup(name="Contour lines", show=True)
     for contour in raw_contours:
-        latlon_points = [(lat, lon) for lon, lat in contour["points"]]
+        points = contour["points"]
+        stride = max(1, math.ceil(len(points) / MAX_DISPLAY_POINTS_PER_CONTOUR))
+        display_points = points[::stride]
+        if display_points[-1] != points[-1]:
+            display_points.append(points[-1])
         folium.PolyLine(
-            latlon_points,
-            color=elevation_color(contour["elevation"], min_e, max_e),
+            [(lat, lon) for lon, lat in display_points],
+            color=elevation_color(contour["elevation"], min_elevation, max_elevation),
             weight=1,
             opacity=0.6,
+            smooth_factor=1.5,
             tooltip=f'{contour["elevation"]} m',
         ).add_to(contour_group)
     contour_group.add_to(fmap)
-    pond_group = folium.FeatureGroup(name="Suggested ponds", show=True)
-    bounds = []
 
-    ordered_candidates = (
-        [c for c in candidates if not c["recommended"]]
-        + [c for c in candidates if c["recommended"]]
-    )
-
-    for cand in ordered_candidates:
-        is_best = cand["recommended"]
-        color = candidate_color(cand)
-
-        boundary_latlon = [
-            (lat, lon)
-            for lon, lat in cand["basinBoundary"]["coordinates"][0]
-        ]
-
-        bounds.extend(boundary_latlon)
-
+    fit_points = list(selected_area) if selected_area else None
+    if selected_area:
         folium.Polygon(
-            boundary_latlon,
-            color=color,
-            weight=3 if is_best else 1.5,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.32 if is_best else 0.18,
-            tooltip=(
-                "Recommended pond"
-                if is_best
-                else f"Alternative #{cand['rank']}"
-            ),
-        ).add_to(pond_group)
-
-        popup_html = f"""
-            <b>
-                {'Recommended pond'
-                if is_best
-                else 'Alternative pond #' + str(cand['rank'])}
-            </b><br>
-            Elevation: {cand['pondElevation']:.1f} m<br>
-            Basin area: {cand['basinAreaSqM']:,.0f} m²<br>
-            Catchment area: {cand['estimatedCatchmentAreaHectares']:.2f} ha<br>
-            Basin depth: {cand['basinDepthM']:.1f} m<br>
-            Estimated volume: {cand['estimatedVolumeM3']:,.0f} m³<br>
-            Compactness: {cand['compactnessScore']:.2f}<br>
-            Latitude: {cand['pondCentroid']['lat']}<br>
-            Longitude: {cand['pondCentroid']['lon']}<br>
-        """
-
-        folium.CircleMarker(
-            location=(
-                cand["pondCentroid"]["lat"],
-                cand["pondCentroid"]["lon"]
-            ),
-            radius=8 if is_best else 6,
-            color="white",
+            [(lat, lon) for lon, lat in selected_area],
+            color="#111827",
             weight=2,
             fill=True,
-            fill_color=color,
-            fill_opacity=1.0,
-            popup=folium.Popup(popup_html, max_width=260),
-        ).add_to(pond_group)
+            fill_color="#F59E0B",
+            fill_opacity=0.12,
+            tooltip="Selected land area",
+        ).add_to(folium.FeatureGroup(name="Selected land area", show=True).add_to(fmap))
 
-    pond_group.add_to(fmap)
+    if result:
+        pond_group = folium.FeatureGroup(name="Pond and catchment results", show=True)
+        candidates = result["pondCandidates"]
+        ordered_candidates = [candidate for candidate in candidates if not candidate["recommended"]]
+        ordered_candidates += [candidate for candidate in candidates if candidate["recommended"]]
+
+        for candidate in ordered_candidates:
+            is_best = candidate["recommended"]
+            color = candidate_color(candidate)
+            boundary = candidate["basinBoundary"]["coordinates"][0]
+            boundary_latlon = [(lat, lon) for lon, lat in boundary]
+            if fit_points is not None:
+                fit_points.extend(boundary)
+            label = "Recommended pond" if is_best else f'Alternative #{candidate["rank"]}'
+            catchment = candidate["estimatedCatchmentAreaHectares"]
+            volume = candidate["estimatedVolumeM3"]
+            folium.Polygon(
+                boundary_latlon,
+                color=color,
+                weight=3 if is_best else 1.5,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.28 if is_best else 0.14,
+                tooltip=f"{label} catchment | {catchment:.2f} ha | {volume:,.0f} m³ storage",
+            ).add_to(pond_group)
+
+            latitude = candidate["pondCentroid"]["lat"]
+            longitude = candidate["pondCentroid"]["lon"]
+            popup_html = (
+                f"<b>{label}</b><br>"
+                f"Suggested location: {latitude:.6f}, {longitude:.6f}<br>"
+                f"Catchment area: {catchment:.2f} ha<br>"
+                f"Expected storage volume: {volume:,.0f} m³<br>"
+                f"Pond elevation: {candidate['pondElevation']:.1f} m"
+            )
+            folium.CircleMarker(
+                location=(latitude, longitude),
+                radius=9 if is_best else 6,
+                color="white",
+                weight=2,
+                fill=True,
+                fill_color=color,
+                fill_opacity=1.0,
+                tooltip=label,
+                popup=folium.Popup(popup_html, max_width=300),
+            ).add_to(pond_group)
+        pond_group.add_to(fmap)
+
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": False,
+            "rectangle": False,
+            "circle": False,
+            "circlemarker": False,
+            "marker": False,
+            "polygon": {"allowIntersection": False, "showArea": True},
+        },
+        edit_options={"edit": True, "remove": True},
+    ).add_to(fmap)
     folium.LayerControl(collapsed=False).add_to(fmap)
-
-    if bounds:
-        fmap.fit_bounds(bounds, padding=(40, 40))
+    fmap.fit_bounds(coordinate_bounds(fit_points) if fit_points else bounds, padding=(24, 24))
     return fmap
 
 
 def render_summary(result: dict[str, Any]) -> None:
     terrain = result["terrainSummary"]
-    cols = st.columns(4)
-    cols[0].metric("Contour interval", f'{result["contourInterval"]:g} m')
-    cols[1].metric("Elevation range", f'{terrain["minElevation"]:g}–{terrain["maxElevation"]:g} m')
-    cols[2].metric("Basin candidates found", terrain["basinCandidateCount"])
-    cols[3].metric("River-like loops filtered", result["riverAvoidance"]["filteredRiverLikeLoopCount"])
+    columns = st.columns(4)
+    columns[0].metric("Contour interval", f'{result["contourInterval"]:g} m')
+    columns[1].metric(
+        "Elevation range",
+        f'{terrain["minElevation"]:g}–{terrain["maxElevation"]:g} m',
+    )
+    columns[2].metric("Basin candidates found", terrain["basinCandidateCount"])
+    columns[3].metric("River-like loops filtered", result["riverAvoidance"]["filteredRiverLikeLoopCount"])
 
 
 def pond_table_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
-    for c in result["pondCandidates"]:
+    for candidate in result["pondCandidates"]:
         rows.append(
             {
-                "Rank": c["rank"],
-                "Site": "Recommended" if c["recommended"] else f'Alternative #{c["rank"]}',
-                "Elevation (m)": c["pondElevation"],
-                "Basin area (m²)": c["basinAreaSqM"],
-                "Depth (m)": c["basinDepthM"],
-                "Volume (m³)": c["estimatedVolumeM3"],
-                "Catchment (ha)": c["estimatedCatchmentAreaHectares"],
-                "Compactness": c["compactnessScore"],
-                "Score": c["score"],
-                "Latitude":c["pondCentroid"]["lat"],
-                "Longitude":c["pondCentroid"]["lon"]
+                "Rank": candidate["rank"],
+                "Site": "Recommended" if candidate["recommended"] else f'Alternative #{candidate["rank"]}',
+                "Elevation (m)": candidate["pondElevation"],
+                "Basin area (m²)": candidate["basinAreaSqM"],
+                "Depth (m)": candidate["basinDepthM"],
+                "Expected volume (m³)": candidate["estimatedVolumeM3"],
+                "Catchment (ha)": candidate["estimatedCatchmentAreaHectares"],
+                "Compactness": candidate["compactnessScore"],
+                "Score": candidate["score"],
+                "Latitude": candidate["pondCentroid"]["lat"],
+                "Longitude": candidate["pondCentroid"]["lon"],
             }
         )
     return rows
 
 
-def render_pond_table(result: dict[str, Any]) -> None:
-    st.dataframe(pond_table_rows(result), width="stretch", hide_index=True)
-
 st.title("Contour & Catchment")
-st.caption("Upload a contour survey and find where the water would collect.")
+st.caption("Contour-based pond siting and storage estimates")
+uploaded = st.file_uploader(
+    "Contour survey (.kml or .kmz)",
+    type=["kml", "kmz"],
+    max_upload_size=MAX_UPLOAD_BYTES // (1024 * 1024),
+)
 
-uploaded = st.file_uploader("Contour map (.kml or .kmz)", type=["kml", "kmz"])
+if uploaded is None:
+    st.info("Upload a KML or KMZ contour survey to begin.")
+    st.stop()
 
-if uploaded is not None:
-    file_bytes = uploaded.getvalue()
+file_bytes = uploaded.getvalue()
+if len(file_bytes) > MAX_UPLOAD_BYTES:
+    st.error("Upload is too large. The maximum supported file size is 25 MB.")
+    st.stop()
 
-    with st.spinner("Analyzing contours…"):
-        try:
-            result = analyze_contour_map(file_bytes, uploaded.name)
-        except ValueError as exc:
-            st.error(str(exc))
-            st.stop()
-        except Exception as exc:  
-            st.error(f"Unexpected error: {exc}")
-            st.stop()
+upload_fingerprint = hashlib.sha256(file_bytes).hexdigest()[:16]
+if st.session_state.get("active_upload") != upload_fingerprint:
+    st.session_state["active_upload"] = upload_fingerprint
+    st.session_state["selected_land_area"] = None
+    st.session_state["map_reset_counter"] = 0
 
-        raw_contours = load_raw_contours(file_bytes, uploaded.name)
+try:
+    raw_contours = cached_raw_contours(file_bytes, uploaded.name)
+except ValueError as exc:
+    st.error(str(exc))
+    st.stop()
 
-    st.success(f'{len(result["pondCandidates"])} pond site(s) suggested.')
+selected_area = st.session_state.get("selected_land_area")
+if selected_area and st.button("Clear selected area"):
+    st.session_state["selected_land_area"] = None
+    st.session_state["map_reset_counter"] = st.session_state.get("map_reset_counter", 0) + 1
+    st.rerun()
 
-    render_summary(result)
+result = None
+analysis_error = None
+if selected_area:
+    area_json = json.dumps(selected_area, separators=(",", ":"))
+    try:
+        with st.spinner("Analyzing contours inside the selected area..."):
+            result = cached_area_analysis(file_bytes, uploaded.name, area_json)
+    except ValueError as exc:
+        analysis_error = str(exc)
 
-    map_col, list_col = st.columns([2, 1])
+map_key = f"pond_map_{upload_fingerprint}_{st.session_state.get('map_reset_counter', 0)}"
+st.subheader("Map")
+st.caption(
+    "Draw a polygon to select land. Pond markers and shaded catchments appear after analysis."
+    if result is None
+    else "The selected land, recommended pond marker, and shaded catchment are shown below."
+)
+map_data = st_folium(
+    build_map(raw_contours, result, selected_area),
+    use_container_width=True,
+    height=610,
+    key=map_key,
+    returned_objects=["last_active_drawing"],
+)
 
-    with map_col:
-        st.subheader("Map")
-        fmap = build_map(raw_contours, result)
-        st_folium(fmap, use_container_width=True, height=560, key="pond_map", returned_objects=[])
+drawing = (map_data or {}).get("last_active_drawing")
+if drawing and drawing.get("geometry", {}).get("type") == "Polygon":
+    ring = drawing["geometry"].get("coordinates", [[]])[0]
+    drawn_area = [(float(point[0]), float(point[1])) for point in ring]
+    if len(drawn_area) >= 4 and drawn_area != selected_area:
+        st.session_state["selected_land_area"] = drawn_area
+        st.rerun()
 
-    with list_col:
-        st.subheader("Suggested ponds")
-        for c in result["pondCandidates"]:
-            color = candidate_color(c)
-            label = "Recommended" if c["recommended"] else f'Alternative #{c["rank"]}'
-            with st.container(border=True):
-                st.markdown(
-                    f'<span style="display:inline-block;width:11px;height:11px;'
-                    f'border-radius:50%;background:{color};margin-right:7px;"></span>'
-                    f'<b>{label}</b>',
-                    unsafe_allow_html=True,
-                )
-                m1, m2 = st.columns(2)
-                m1.metric("Area", f'{c["basinAreaSqM"]:,.0f} m²')
-                m2.metric("Depth", f'{c["basinDepthM"]:.1f} m')
-                m3, m4 = st.columns(2)
-                m3.metric("Volume", f'{c["estimatedVolumeM3"]:,.0f} m³')
-                m4.metric("Catchment", f'{c["estimatedCatchmentAreaHectares"]:.2f} ha')
+if result is None:
+    if analysis_error:
+        st.warning(analysis_error)
+    else:
+        st.info("Draw a polygon on the map to select the land area for analysis.")
+    st.stop()
 
-    st.subheader("All suggested ponds")
-    render_pond_table(result)
+st.success(f'Analysis completed using {result["terrainSummary"]["contourCount"]} selected contour rings.')
+recommended = result["pondCandidates"][0]
+location = recommended["pondCentroid"]
+summary_columns = st.columns(3)
+summary_columns[0].metric("Suggested pond location", f'{location["lat"]:.6f}, {location["lon"]:.6f}')
+summary_columns[1].metric(
+    "Catchment area",
+    f'{recommended["estimatedCatchmentAreaHectares"]:.2f} ha',
+    f'{recommended["estimatedCatchmentAreaSqM"]:,.0f} m²',
+)
+summary_columns[2].metric("Expected water volume", f'{recommended["estimatedVolumeM3"]:,.0f} m³')
+st.caption("Water volume is estimated pond storage capacity from contour geometry; actual collected yield depends on rainfall and runoff.")
 
-    with st.expander("Full JSON response"):
-        st.json(result)
+render_summary(result)
+st.subheader("Suggested ponds")
+for candidate in result["pondCandidates"]:
+    color = candidate_color(candidate)
+    label = "Recommended" if candidate["recommended"] else f'Alternative #{candidate["rank"]}'
+    with st.container(border=True):
+        st.markdown(
+            f'<span style="display:inline-block;width:11px;height:11px;'
+            f'border-radius:50%;background:{color};margin-right:7px;"></span>'
+            f'<b>{label}</b>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f'Location: {candidate["pondCentroid"]["lat"]:.6f}, '
+            f'{candidate["pondCentroid"]["lon"]:.6f}'
+        )
+        first, second = st.columns(2)
+        first.metric("Catchment", f'{candidate["estimatedCatchmentAreaHectares"]:.2f} ha')
+        second.metric("Expected volume", f'{candidate["estimatedVolumeM3"]:,.0f} m³')
 
-    st.download_button(
-        "Download JSON",
-        data=json.dumps(result, indent=2),
-        file_name="pond_catchment_analysis.json",
-        mime="application/json",
-    )
-else:
-    st.info("Upload a .kml or .kmz contour export to run the analysis.")
+st.subheader("All suggested ponds")
+st.dataframe(pond_table_rows(result), width="stretch", hide_index=True)
+with st.expander("Full JSON response"):
+    st.json(result)
+st.download_button(
+    "Download JSON",
+    data=json.dumps(result, indent=2),
+    file_name="pond_catchment_analysis.json",
+    mime="application/json",
+)
