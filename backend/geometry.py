@@ -4,6 +4,13 @@ import math
 from typing import Sequence, Tuple
 
 
+def normalize_lonlat_ring(points: Sequence[Tuple[float, float]]) -> list[Tuple[float, float]]:
+    normalized = [(round(float(lon), 7), round(float(lat), 7)) for lon, lat in points]
+    if normalized and normalized[0] != normalized[-1]:
+        normalized.append(normalized[0])
+    return normalized
+
+
 def shoelace_area(points: Sequence[Tuple[float, float]]) -> float:
     if len(points) < 3:
         return 0.0

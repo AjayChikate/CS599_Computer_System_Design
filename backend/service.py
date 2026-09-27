@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import logging
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import MAX_ALTERNATIVE_CANDIDATES, MIN_LOOP_AREA_M2, RIVER_ELONGATION_MIN, RIVER_ROUNDNESS_MAX
@@ -17,6 +19,9 @@ from .geometry import (
 )
 from .models import BasinCandidate, Loop
 from .parsing import load_raw_contours
+
+logger = logging.getLogger(__name__)
+logging.getLogger("backend").setLevel(logging.INFO)
 
 
 def _build_containment_tree(loops: List[Loop]) -> None:
@@ -133,10 +138,13 @@ def _inside_or_on_boundary(point: Tuple[float, float], polygon: List[Tuple[float
 
 
 def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
+    analysis_started = time.perf_counter()
     if not raw_contours:
+        logger.warning("Contour analysis rejected: no contour lines provided")
         raise ValueError("No contour lines were found in the uploaded file.")
 
     all_points = [p for contour in raw_contours for p in contour["points"]]
+    logger.info("Contour analysis started: contours=%d coordinate_points=%d", len(raw_contours), len(all_points))
     lon0 = sum(p[0] for p in all_points) / len(all_points)
     lat0 = sum(p[1] for p in all_points) / len(all_points)
     lat_rad = math.radians(lat0)
@@ -178,6 +186,7 @@ def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
         )
 
     if not loops:
+        logger.warning("Contour analysis found no usable closed loops")
         raise ValueError("The uploaded contours do not contain a usable closed basin.")
 
     _build_containment_tree(loops)
@@ -190,6 +199,7 @@ def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
     river_like_count = sum(1 for loop in loops if loop.is_river_like)
 
     if not basin_candidates:
+        logger.warning("No basin candidates passed compactness and river filters: loops=%d", len(loops))
         raise ValueError("No compact, non-river closed basin was detected in this contour map.")
 
     ranked = _score_candidates(basin_candidates)
@@ -221,7 +231,6 @@ def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
             "pondCentroid": {"lon": round(c_lon, 6), "lat": round(c_lat, 6)},
             "basinAreaSqM": round(candidate.floor.area_m2, 2),
             "estimatedCatchmentAreaSqM": round(candidate.catchment_area_m2, 2),
-            "estimatedCatchmentAreaHectares": round(candidate.catchment_area_m2 / 10_000.0, 3),
             "basinDepthM": round(candidate.depth_m, 3),
             "estimatedVolumeM3": round(volume_m3, 2),
             "compactnessScore": round(candidate.avg_roundness, 4),
@@ -246,12 +255,11 @@ def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
         if len(alternatives) >= MAX_ALTERNATIVE_CANDIDATES:
             break
 
-    return {
+    result = {
         "status": "ok",
         "contourInterval": round(contour_interval, 3),
         "pondElevation": round(best.floor.elevation, 3),
         "estimatedCatchmentAreaSqM": round(best.catchment_area_m2, 2),
-        "estimatedCatchmentAreaHectares": round(best.catchment_area_m2 / 10_000.0, 3),
         "basinAreaSqM": round(best.floor.area_m2, 2),
         "basinDepthM": round(best.depth_m, 3),
         "estimatedVolumeM3": round(best_volume_m3, 2),
@@ -286,6 +294,16 @@ def analyze_contours(raw_contours: List[dict[str, Any]]) -> dict[str, Any]:
         "pondCandidates": pond_candidates,
         "alternativeCandidates": alternatives,
     }
+    logger.info(
+        "Contour analysis complete: loops=%d candidates=%d alternatives=%d recommended=(%.6f, %.6f) runtime=%.2f s",
+        len(loops),
+        len(pond_candidates),
+        len(alternatives),
+        pond_lat,
+        pond_lon,
+        time.perf_counter() - analysis_started,
+    )
+    return result
 
 
 def analyze_contours_in_area(

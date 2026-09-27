@@ -23,6 +23,8 @@ def test_analyze_contour_accepts_kml() -> None:
     payload = response.json()
     assert payload["status"] == "ok"
     assert payload["estimatedCatchmentAreaSqM"] > 0
+    assert "estimatedCatchmentAreaHectares" not in payload
+    assert "estimatedCatchmentAreaHectares" not in payload["pondCandidates"][0]
     assert payload["pondElevation"] > 0
 
 

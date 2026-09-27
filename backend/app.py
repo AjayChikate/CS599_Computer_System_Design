@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logging.getLogger("backend").setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     from .config import MAX_UPLOAD_BYTES
@@ -36,7 +44,9 @@ async def _run_analysis(contour_map: UploadFile | None, file: UploadFile | None 
         raise ValueError("A file upload is required.")
     contents = await upload.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
+        logger.warning("File analysis rejected: upload exceeded %d bytes", MAX_UPLOAD_BYTES)
         raise ValueError("Upload is too large. The maximum supported file size is 25 MB.")
+    logger.info("File analysis request started: filename=%s bytes=%d", upload.filename, len(contents))
     return analyze_contour_map(contents, upload.filename)
 
 
@@ -66,6 +76,7 @@ async def analyze_contour(
     except ValueError as exc:
         return _error_response(400, str(exc))
     except Exception as exc:  # pragma: no cover
+        logger.exception("Contour API analysis request failed")
         return _error_response(500, f"Unexpected server error: {exc}")
 
 
@@ -80,7 +91,6 @@ async def analyze_contour_summary(
             "pondElevation": analysis["pondElevation"],
             "pondCentroid": analysis["pondCentroid"],
             "estimatedCatchmentAreaSqM": analysis["estimatedCatchmentAreaSqM"],
-            "estimatedCatchmentAreaHectares": analysis["estimatedCatchmentAreaHectares"],
             "basinDepthM": analysis["basinDepthM"],
             "compactnessScore": analysis["compactnessScore"],
             "confidenceScore": analysis["confidenceScore"],
@@ -91,6 +101,7 @@ async def analyze_contour_summary(
     except ValueError as exc:
         return _error_response(400, str(exc))
     except Exception as exc:  # pragma: no cover
+        logger.exception("Contour API summary request failed")
         return _error_response(500, f"Unexpected server error: {exc}")
 
 
@@ -110,6 +121,7 @@ async def analyze_contour_candidates(
     except ValueError as exc:
         return _error_response(400, str(exc))
     except Exception as exc:  
+        logger.exception("Contour API candidate request failed")
         return _error_response(500, f"Unexpected server error: {exc}")
 
 
@@ -136,6 +148,7 @@ async def analyze_contour_raw(
     except ValueError as exc:
         return _error_response(400, str(exc))
     except Exception as exc:  
+        logger.exception("Raw contour API request failed")
         return _error_response(500, f"Unexpected server error: {exc}")
 
 
