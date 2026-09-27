@@ -4,6 +4,7 @@ import logging
 import math
 from collections import defaultdict
 from datetime import date
+import time
 from typing import Any
 
 import requests
@@ -12,6 +13,8 @@ logger = logging.getLogger(__name__)
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 MAX_RAINFALL_YEARS = 30
 RUNOFF_COEFFICIENT = 0.20
+RAINFALL_REQUEST_TIMEOUT = (60, 180)
+MAX_RAINFALL_RETRIES = 3
 
 
 def fetch_historical_rainfall(
@@ -53,23 +56,45 @@ def fetch_historical_rainfall_for_points(
         end_year,
         len(locations),
     )
-    try:
-        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(5, 45))
-        if response.status_code != 200:
-            logger.warning("Rainfall provider returned HTTP %d", response.status_code)
-            raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
-        payload = response.json()
-    except requests.Timeout as exc:
-        logger.warning("Rainfall request timed out")
-        raise ValueError("The rainfall service took too long to respond. Try again shortly.") from exc
-    except requests.RequestException as exc:
-        logger.error("Rainfall network request failed: %s", type(exc).__name__)
-        raise ValueError("Could not connect to the rainfall service. Check the network and try again.") from exc
-    except ValueError:
-        raise
-    except Exception as exc:
-        logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
-        raise ValueError("The rainfall service returned an unreadable response.") from exc
+    payload = None
+    for attempt in range(1, MAX_RAINFALL_RETRIES + 1):
+        try:
+            response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=RAINFALL_REQUEST_TIMEOUT)
+            if response.status_code == 429:
+                if attempt < MAX_RAINFALL_RETRIES:
+                    logger.warning("Rainfall provider rate limited (429); retrying (attempt %d/%d)...", attempt, MAX_RAINFALL_RETRIES)
+                    time.sleep(1.0 * attempt)
+                    continue
+                raise ValueError("Rainfall provider returned HTTP 429.")
+            if response.status_code in {500, 502, 503, 504}:
+                if attempt < MAX_RAINFALL_RETRIES:
+                    logger.warning("Rainfall provider server error (%d); retrying (attempt %d/%d)...", response.status_code, attempt, MAX_RAINFALL_RETRIES)
+                    time.sleep(1.0 * attempt)
+                    continue
+                raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
+            if response.status_code != 200:
+                logger.warning("Rainfall provider returned HTTP %d", response.status_code)
+                raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
+            payload = response.json()
+            break
+        except requests.Timeout as exc:
+            logger.warning("Rainfall request timed out on attempt %d/%d", attempt, MAX_RAINFALL_RETRIES)
+            if attempt < MAX_RAINFALL_RETRIES:
+                time.sleep(1.0 * attempt)
+                continue
+            raise ValueError("The rainfall service took too long to respond. Try again shortly.") from exc
+        except requests.RequestException as exc:
+            logger.warning("Rainfall network error on attempt %d/%d: %s", attempt, MAX_RAINFALL_RETRIES, type(exc).__name__)
+            if attempt < MAX_RAINFALL_RETRIES:
+                time.sleep(1.0 * attempt)
+                continue
+            logger.error("Rainfall network request failed after %d attempts: %s", MAX_RAINFALL_RETRIES, type(exc).__name__)
+            raise ValueError("Could not connect to the rainfall service. Check the network and try again.") from exc
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
+            raise ValueError("The rainfall service returned an unreadable response.") from exc
 
     payloads = payload if isinstance(payload, list) else [payload]
     if len(payloads) != len(locations):
