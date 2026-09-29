@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import logging
 import os
+import time
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter
@@ -98,70 +99,92 @@ def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str =
         "outputFormat": "GTiff",
         "API_Key": api_key.strip(),
     }
-    request_started = perf_counter()
+
     logger.info(
         "DEM request started: dataset=%s bbox=[%.5f, %.5f, %.5f, %.5f] bbox_area=%.2f km^2",
-        dataset,
-        west,
-        south,
-        east,
-        north,
-        area_km2,
+        dataset, west, south, east, north, area_km2,
     )
-    try:
-        with requests.get(OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(10, 120)) as response:
-            logger.info(
-                "DEM provider responded: status=%d response_time=%.2f s",
-                response.status_code,
-                perf_counter() - request_started,
-            )
-            if response.status_code == 401:
-                logger.error("DEM request rejected: provider returned HTTP 401")
-                raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
-            if response.status_code == 204:
-                logger.warning("DEM request returned no data for selected bounds")
-                raise ValueError("OpenTopography has no elevation data for this area.")
-            if response.status_code == 429:
-                logger.warning("DEM request rate limited by provider")
-                raise ValueError("OpenTopography rate limit reached. Try again later.")
-            if response.status_code != 200:
-                logger.error("DEM request failed: provider returned HTTP %d", response.status_code)
-                raise ValueError(f"OpenTopography returned HTTP {response.status_code}.")
 
-            content_length = response.headers.get("Content-Length")
-            if content_length:
-                try:
-                    declared_size = int(content_length)
-                except ValueError as exc:
-                    logger.error("DEM response has an invalid Content-Length header")
-                    raise ValueError("OpenTopography returned an invalid response size.") from exc
-                if declared_size > MAX_DEM_BYTES:
-                    logger.warning("DEM response rejected: declared size=%d bytes, limit=%d", declared_size, MAX_DEM_BYTES)
-                    raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
+    max_attempts = 3
+    retry_delay_s = 3.0
 
-            chunks = []
-            total_bytes = 0
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                total_bytes += len(chunk)
-                if total_bytes > MAX_DEM_BYTES:
-                    logger.warning("DEM response exceeded the %d-byte streaming limit", MAX_DEM_BYTES)
-                    raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
-                chunks.append(chunk)
-            dem_bytes = b"".join(chunks)
-            logger.info(
-                "DEM download complete: bytes=%d total_time=%.2f s",
-                len(dem_bytes),
-                perf_counter() - request_started,
-            )
-            return dem_bytes
-    except requests.Timeout as exc:
-        logger.warning("DEM request timed out after %.2f s", perf_counter() - request_started)
-        raise ValueError("OpenTopography took too long to respond. Try again with a smaller area.") from exc
-    except requests.RequestException as exc:
-        logger.error("DEM network request failed: %s", type(exc).__name__)
-        raise ValueError("Could not connect to OpenTopography. Check the network and try again.") from exc
+    for attempt in range(1, max_attempts + 1):
+        request_started = perf_counter()
+        try:
+            with requests.get(OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(10, 120)) as response:
+                logger.info(
+                    "DEM provider responded: status=%d response_time=%.2f s",
+                    response.status_code,
+                    perf_counter() - request_started,
+                )
+                if response.status_code == 401:
+                    logger.error("DEM request rejected: provider returned HTTP 401")
+                    raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
+                if response.status_code == 204:
+                    logger.warning("DEM request returned no data for selected bounds")
+                    raise ValueError("OpenTopography has no elevation data for this area.")
+                if response.status_code == 429:
+                    logger.warning("DEM request rate limited by provider")
+                    raise ValueError("OpenTopography rate limit reached. Try again later.")
+                if response.status_code != 200:
+                    logger.error("DEM request failed: provider returned HTTP %d", response.status_code)
+                    raise ValueError(f"OpenTopography returned HTTP {response.status_code}.")
+
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError as exc:
+                        logger.error("DEM response has an invalid Content-Length header")
+                        raise ValueError("OpenTopography returned an invalid response size.") from exc
+                    if declared_size > MAX_DEM_BYTES:
+                        logger.warning("DEM response rejected: declared size=%d bytes, limit=%d", declared_size, MAX_DEM_BYTES)
+                        raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
+
+                chunks = []
+                total_bytes = 0
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_DEM_BYTES:
+                        logger.warning("DEM response exceeded the %d-byte streaming limit", MAX_DEM_BYTES)
+                        raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
+                    chunks.append(chunk)
+                dem_bytes = b"".join(chunks)
+                logger.info(
+                    "DEM download complete: bytes=%d total_time=%.2f s",
+                    len(dem_bytes),
+                    perf_counter() - request_started,
+                )
+                return dem_bytes
+
+        except requests.Timeout:
+            elapsed = perf_counter() - request_started
+            if attempt < max_attempts:
+                logger.warning(
+                    "DEM request timed out after %.2f s (attempt %d/%d) — retrying in %.0f s",
+                    elapsed, attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.warning("DEM request timed out after %.2f s (all %d attempts exhausted)", elapsed, max_attempts)
+                raise ValueError("OpenTopography took too long to respond. Try again with a smaller area.") from None
+
+        except requests.RequestException as exc:
+            elapsed = perf_counter() - request_started
+            if attempt < max_attempts:
+                logger.warning(
+                    "DEM network request failed: %s (attempt %d/%d) — retrying in %.0f s",
+                    type(exc).__name__, attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.error(
+                    "DEM network request failed: %s (all %d attempts exhausted)", type(exc).__name__, max_attempts,
+                )
+                raise ValueError("Could not connect to OpenTopography after 3 attempts. Check the network and try again.") from exc
+
 
 
 def _inside_or_on_edge(point: Tuple[float, float], polygon: Sequence[Tuple[float, float]]) -> bool:

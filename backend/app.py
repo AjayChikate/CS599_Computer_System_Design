@@ -12,11 +12,27 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+
+class _StreamlitNoiseFilter(logging.Filter):
+    """Suppress Streamlit health-check polling noise from uvicorn access logs.
+
+    When a browser has an old Streamlit tab open it repeatedly polls
+    /_stcore/health and /_stcore/host-config.  These are harmless 404s but
+    they flood the log.  This filter drops them silently.
+    """
+    _PREFIXES = ("/_stcore/health", "/_stcore/host-config", "/static/media/Source")
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        msg = record.getMessage()
+        return not any(p in msg for p in self._PREFIXES)
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logging.getLogger("backend").setLevel(logging.INFO)
+logging.getLogger("uvicorn.access").addFilter(_StreamlitNoiseFilter())
 logger = logging.getLogger(__name__)
 
 try:
