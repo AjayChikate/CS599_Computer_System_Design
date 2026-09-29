@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pond Catchment Analysis</title>
+
+  <!-- Leaflet map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Leaflet.draw (polygon drawing toolbar) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── SIDEBAR ── -->
+    <aside id="sidebar">
+      <header class="sidebar-header">
+        <div class="logo">🏞️</div>
+        <div>
+          <h1>Pond Catchment</h1>
+          <p class="subtitle">Village pond site screening</p>
+        </div>
+      </header>
+
+      <!-- Mode tabs -->
+      <div class="mode-tabs" role="tablist">
+        <button class="tab active" data-mode="dem" role="tab">📡 Satellite DEM</button>
+        <button class="tab" data-mode="upload" role="tab">📂 Upload Survey</button>
+      </div>
+
+      <!-- ── DEM mode panel ── -->
+      <div id="dem-panel" class="panel">
+        <div class="field-group">
+          <label for="dataset-select">Elevation Dataset</label>
+          <select id="dataset-select">
+            <option value="COP30">COP30 — Copernicus 30 m (recommended)</option>
+            <option value="AW3D30">AW3D30 — ALOS World 3D 30 m</option>
+            <option value="SRTMGL1">SRTMGL1 — SRTM 30 m</option>
+          </select>
+        </div>
+
+        <div class="area-hint">
+          <span class="icon">✏️</span>
+          <span>Draw a polygon on the map. Keep area <strong>under 0.5 km²</strong> (≈ 700 m × 700 m).</span>
+        </div>
+
+        <div id="dem-area-display" class="area-display hidden">
+          Area: <span id="dem-area-value">—</span>
+        </div>
+
+        <button id="analyze-dem-btn" class="btn btn-primary" disabled>
+          ⚡ Fetch DEM &amp; Analyze
+        </button>
+        <button id="clear-dem-btn" class="btn btn-ghost hidden">✕ Clear polygon</button>
+      </div>
+
+      <!-- ── Upload mode panel ── -->
+      <div id="upload-panel" class="panel hidden">
+        <div class="field-group">
+          <label for="file-input">Contour survey (.kml or .kmz)</label>
+          <div class="file-drop" id="file-drop">
+            <input type="file" id="file-input" accept=".kml,.kmz" />
+            <span id="file-label">Drop file here or <u>browse</u></span>
+          </div>
+        </div>
+
+        <div class="area-hint">
+          <span class="icon">✏️</span>
+          <span>Also draw a polygon to restrict the analysis to a specific sub-area.</span>
+        </div>
+
+        <div id="upload-area-display" class="area-display hidden">
+          Area: <span id="upload-area-value">—</span>
+        </div>
+
+        <button id="analyze-upload-btn" class="btn btn-primary" disabled>
+          ⚡ Analyze Survey
+        </button>
+        <button id="clear-upload-btn" class="btn btn-ghost hidden">✕ Clear polygon</button>
+      </div>
+
+      <!-- Status bar -->
+      <div id="status-bar" class="status-bar hidden">
+        <div class="spinner" id="status-spinner"></div>
+        <span id="status-text"></span>
+      </div>
+
+      <!-- Results panel (hidden until analysis complete) -->
+      <div id="results-panel" class="hidden">
+        <div class="section-title">📍 Recommended Site</div>
+
+        <div id="metrics-grid" class="metrics-grid"></div>
+
+        <div class="section-title" style="margin-top:16px">🌧️ ERA5 Rainfall (10-year avg)</div>
+        <div class="chart-container">
+          <canvas id="rainfall-chart"></canvas>
+          <div id="rainfall-loading" class="chart-loading">Fetching rainfall data…</div>
+        </div>
+
+        <div id="runoff-summary" class="runoff-summary hidden"></div>
+
+        <div class="download-row" id="download-row">
+          <button class="btn btn-outline" id="dl-kml-btn">⬇ KML</button>
+          <button class="btn btn-outline" id="dl-json-btn">⬇ JSON</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── MAP ── -->
+    <main id="map"></main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

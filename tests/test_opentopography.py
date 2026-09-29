@@ -13,8 +13,9 @@ from backend.service import analyze_contours_in_area
 
 
 def synthetic_dem() -> tuple[bytes, list[tuple[float, float]]]:
+    # 100×100 grid at 0.00006°/pixel → 0.006°×0.006° bbox ≈ 0.35 km² (under 0.5 km² limit)
     width = height = 100
-    resolution = 0.00027
+    resolution = 0.00006
     west = 81.30
     north = 21.28
     rows, columns = np.mgrid[0:height, 0:width]
@@ -46,8 +47,9 @@ def synthetic_dem() -> tuple[bytes, list[tuple[float, float]]]:
 
 
 def monotonic_dem(flat: bool = False) -> tuple[bytes, list[tuple[float, float]]]:
+    # 100×100 grid at 0.00006°/pixel → 0.006°×0.006° bbox ≈ 0.35 km² (under 0.5 km² limit)
     width = height = 100
-    resolution = 0.00027
+    resolution = 0.00006
     west = 81.30
     north = 21.28
     rows, columns = np.mgrid[0:height, 0:width]
@@ -121,15 +123,16 @@ def test_dem_area_workflow_fetches_once_and_returns_kml(monkeypatch: pytest.Monk
 
 
 def test_global_dem_selection_enforces_area_limit() -> None:
+    # 0.008° × 0.008° at 21°N ≈ 0.75 km² — exceeds the 0.5 km² server network limit
     oversized_polygon = [
-        (81.0, 21.0),
-        (82.0, 21.0),
-        (82.0, 22.0),
-        (81.0, 22.0),
-        (81.0, 21.0),
+        (81.000, 21.000),
+        (81.008, 21.000),
+        (81.008, 21.008),
+        (81.000, 21.008),
+        (81.000, 21.000),
     ]
 
-    with pytest.raises(ValueError, match="maximum is 25 km²"):
+    with pytest.raises(ValueError, match="server limit"):
         opentopography.validate_area_polygon(oversized_polygon)
 
 

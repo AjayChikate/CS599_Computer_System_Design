@@ -28,7 +28,7 @@ logging.getLogger("backend").setLevel(logging.INFO)
 
 OPENTOPOGRAPHY_URL = "https://portal.opentopography.org/API/globaldem"
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
-MAX_AREA_KM2 = 25.0
+MAX_AREA_KM2 = 0.5
 MAX_DEM_BYTES = 32 * 1024 * 1024
 MAX_GRID_CELLS = 2_000_000
 MAX_POLYGON_VERTICES = 200
@@ -63,7 +63,10 @@ def validate_area_polygon(area_polygon: Sequence[Tuple[float, float]]) -> tuple[
         raise ValueError("Select a larger area (at least 0.01 km²) to get useful terrain coverage.")
     if area_km2 > MAX_AREA_KM2:
         logger.warning("Rejected selected bounding area: %.2f km² exceeds %.2f km² app limit", area_km2, MAX_AREA_KM2)
-        raise ValueError(f"The selected map area is too large. The maximum is {MAX_AREA_KM2:g} km².")
+        raise ValueError(
+            f"Selected area is {area_km2:.2f} km², which exceeds the {MAX_AREA_KM2} km² server limit. "
+            f"Draw a smaller polygon — aim for roughly 700 m × 700 m or less."
+        )
     if east - west < 0.0005 or north - south < 0.0005:
         raise ValueError("The selected map area is too narrow for 30 m elevation data.")
     return west, south, east, north
