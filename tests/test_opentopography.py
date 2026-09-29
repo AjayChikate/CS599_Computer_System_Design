@@ -123,13 +123,12 @@ def test_dem_area_workflow_fetches_once_and_returns_kml(monkeypatch: pytest.Monk
 
 
 def test_global_dem_selection_enforces_area_limit() -> None:
-    # 0.008° × 0.008° at 21°N ≈ 0.75 km² — exceeds the 0.5 km² server network limit
     oversized_polygon = [
-        (81.000, 21.000),
-        (81.008, 21.000),
-        (81.008, 21.008),
-        (81.000, 21.008),
-        (81.000, 21.000),
+        (81.0, 21.0),
+        (82.0, 21.0),
+        (82.0, 22.0),
+        (81.0, 22.0),
+        (81.0, 21.0),
     ]
 
     with pytest.raises(ValueError, match="server limit"):

@@ -29,7 +29,17 @@ logging.getLogger("backend").setLevel(logging.INFO)
 
 OPENTOPOGRAPHY_URL = "https://portal.opentopography.org/API/globaldem"
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
-MAX_AREA_KM2 = 0.5
+
+# Maximum area the user may select (km²). Read from env so the same codebase
+# works both locally (default 25 km²) and on restricted campus servers.
+# On the SSH server, add  MAX_AREA_KM2=0.5  to your .env file.
+MAX_AREA_KM2: float = float(os.getenv("MAX_AREA_KM2", "25.0"))
+
+# If set, large requests are split into tiles of this size (km²) and mosaicked.
+# On restricted campus networks, set  OPENTOPO_TILE_KM2=0.4  in your .env.
+# Leave unset (or 0) to download the entire bbox in one request (default).
+_TILE_KM2: float = float(os.getenv("OPENTOPO_TILE_KM2", "0"))
+
 MAX_DEM_BYTES = 32 * 1024 * 1024
 MAX_GRID_CELLS = 2_000_000
 MAX_POLYGON_VERTICES = 200
@@ -65,8 +75,8 @@ def validate_area_polygon(area_polygon: Sequence[Tuple[float, float]]) -> tuple[
     if area_km2 > MAX_AREA_KM2:
         logger.warning("Rejected selected bounding area: %.2f km² exceeds %.2f km² app limit", area_km2, MAX_AREA_KM2)
         raise ValueError(
-            f"Selected area is {area_km2:.2f} km², which exceeds the {MAX_AREA_KM2} km² server limit. "
-            f"Draw a smaller polygon — aim for roughly 700 m × 700 m or less."
+            f"Selected area is {area_km2:.2f} km², which exceeds the {MAX_AREA_KM2:.1f} km² server limit. "
+            f"Draw a smaller polygon."
         )
     if east - west < 0.0005 or north - south < 0.0005:
         raise ValueError("The selected map area is too narrow for 30 m elevation data.")
@@ -77,46 +87,49 @@ def _configured_api_key() -> str:
     return os.getenv("API_Key", "").strip()
 
 
-def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30") -> bytes:
-    west, south, east, north = validate_area_polygon(area_polygon)
-    width_km = (east - west) * 111.32 * math.cos(math.radians((north + south) / 2))
-    height_km = (north - south) * 110.574
-    area_km2 = width_km * height_km
-    api_key = _configured_api_key()
-    if not api_key:
-        logger.error("DEM request blocked: API_Key is not configured in the server environment")
-        raise ValueError("OpenTopography API key is missing. Set API_Key in the project .env file and restart the app.")
-    if dataset not in {"COP30", "SRTMGL1", "AW3D30"}:
-        logger.error("DEM request blocked: unsupported dataset=%s", dataset)
-        raise ValueError("Unsupported global elevation dataset.")
+def _fetch_single_tile(
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    dataset: str,
+    api_key: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_s: float = 3.0,
+) -> bytes:
+    """Download one DEM GeoTIFF tile from OpenTopography with retry on transient errors.
 
+    Retries on ConnectionError and Timeout only.  HTTP errors such as 401 /
+    429 / 204 are permanent — they raise immediately without retrying.
+    """
+    center_lat = (north + south) / 2
+    tile_area_km2 = (
+        (east - west) * 111.32 * math.cos(math.radians(center_lat))
+        * (north - south) * 110.574
+    )
     params = {
-        "demtype": dataset,
-        "south": south,
-        "north": north,
-        "west": west,
-        "east": east,
+        "demtype":      dataset,
+        "south":        south,
+        "north":        north,
+        "west":         west,
+        "east":         east,
         "outputFormat": "GTiff",
-        "API_Key": api_key.strip(),
+        "API_Key":      api_key,
     }
 
-    logger.info(
-        "DEM request started: dataset=%s bbox=[%.5f, %.5f, %.5f, %.5f] bbox_area=%.2f km^2",
-        dataset, west, south, east, north, area_km2,
-    )
-
-    max_attempts = 3
-    retry_delay_s = 3.0
-
     for attempt in range(1, max_attempts + 1):
-        request_started = perf_counter()
+        t0 = perf_counter()
         try:
-            with requests.get(OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(10, 120)) as response:
+            with requests.get(
+                OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(10, 120)
+            ) as response:
+                elapsed = perf_counter() - t0
                 logger.info(
-                    "DEM provider responded: status=%d response_time=%.2f s",
-                    response.status_code,
-                    perf_counter() - request_started,
+                    "DEM provider responded: status=%d response_time=%.2f s bbox_area=%.3f km^2",
+                    response.status_code, elapsed, tile_area_km2,
                 )
+                # --- Permanent HTTP failures (no retry) ---
                 if response.status_code == 401:
                     logger.error("DEM request rejected: provider returned HTTP 401")
                     raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
@@ -130,61 +143,191 @@ def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str =
                     logger.error("DEM request failed: provider returned HTTP %d", response.status_code)
                     raise ValueError(f"OpenTopography returned HTTP {response.status_code}.")
 
-                content_length = response.headers.get("Content-Length")
-                if content_length:
+                # --- Size guard ---
+                cl = response.headers.get("Content-Length")
+                if cl:
                     try:
-                        declared_size = int(content_length)
+                        declared = int(cl)
                     except ValueError as exc:
-                        logger.error("DEM response has an invalid Content-Length header")
-                        raise ValueError("OpenTopography returned an invalid response size.") from exc
-                    if declared_size > MAX_DEM_BYTES:
-                        logger.warning("DEM response rejected: declared size=%d bytes, limit=%d", declared_size, MAX_DEM_BYTES)
-                        raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
+                        raise ValueError("OpenTopography returned an invalid Content-Length.") from exc
+                    if declared > MAX_DEM_BYTES:
+                        raise ValueError("The downloaded elevation grid exceeds the 32 MB limit.")
 
-                chunks = []
-                total_bytes = 0
+                # --- Stream download ---
+                chunks: list[bytes] = []
+                total = 0
                 for chunk in response.iter_content(chunk_size=64 * 1024):
                     if not chunk:
                         continue
-                    total_bytes += len(chunk)
-                    if total_bytes > MAX_DEM_BYTES:
-                        logger.warning("DEM response exceeded the %d-byte streaming limit", MAX_DEM_BYTES)
-                        raise ValueError("The downloaded elevation grid exceeds the 32 MB processing limit.")
+                    total += len(chunk)
+                    if total > MAX_DEM_BYTES:
+                        raise ValueError("The downloaded elevation grid exceeds the 32 MB limit.")
                     chunks.append(chunk)
+
                 dem_bytes = b"".join(chunks)
                 logger.info(
                     "DEM download complete: bytes=%d total_time=%.2f s",
-                    len(dem_bytes),
-                    perf_counter() - request_started,
+                    len(dem_bytes), perf_counter() - t0,
                 )
                 return dem_bytes
 
         except requests.Timeout:
-            elapsed = perf_counter() - request_started
+            elapsed = perf_counter() - t0
             if attempt < max_attempts:
                 logger.warning(
-                    "DEM request timed out after %.2f s (attempt %d/%d) — retrying in %.0f s",
+                    "DEM tile timed out after %.2f s (attempt %d/%d) — retrying in %.0f s",
                     elapsed, attempt, max_attempts, retry_delay_s,
                 )
                 time.sleep(retry_delay_s)
             else:
-                logger.warning("DEM request timed out after %.2f s (all %d attempts exhausted)", elapsed, max_attempts)
-                raise ValueError("OpenTopography took too long to respond. Try again with a smaller area.") from None
+                logger.warning(
+                    "DEM tile timed out after %.2f s (all %d attempts exhausted)",
+                    elapsed, max_attempts,
+                )
+                raise ValueError(
+                    "OpenTopography took too long to respond. "
+                    "Try a smaller area or retry later."
+                ) from None
 
         except requests.RequestException as exc:
-            elapsed = perf_counter() - request_started
+            elapsed = perf_counter() - t0
             if attempt < max_attempts:
                 logger.warning(
-                    "DEM network request failed: %s (attempt %d/%d) — retrying in %.0f s",
+                    "DEM tile network error: %s (attempt %d/%d) — retrying in %.0f s",
                     type(exc).__name__, attempt, max_attempts, retry_delay_s,
                 )
                 time.sleep(retry_delay_s)
             else:
                 logger.error(
-                    "DEM network request failed: %s (all %d attempts exhausted)", type(exc).__name__, max_attempts,
+                    "DEM tile network error: %s (all %d attempts exhausted)",
+                    type(exc).__name__, max_attempts,
                 )
-                raise ValueError("Could not connect to OpenTopography after 3 attempts. Check the network and try again.") from exc
+                raise ValueError(
+                    "Could not connect to OpenTopography after 3 attempts. "
+                    "Check the network and try again."
+                ) from exc
 
+    raise RuntimeError("Unreachable")  # pragma: no cover
+
+
+def _split_bbox(
+    west: float, south: float, east: float, north: float, max_tile_km2: float
+) -> list[tuple[float, float, float, float]]:
+    """Partition a bounding box into a grid of tiles each ≤ max_tile_km2 km²."""
+    center_lat = (north + south) / 2
+    width_km   = (east - west)   * 111.32 * math.cos(math.radians(center_lat))
+    height_km  = (north - south) * 110.574
+    tile_side  = math.sqrt(max_tile_km2)
+    cols = max(1, math.ceil(width_km  / tile_side))
+    rows = max(1, math.ceil(height_km / tile_side))
+    dlon = (east - west)   / cols
+    dlat = (north - south) / rows
+    tiles: list[tuple[float, float, float, float]] = []
+    for r in range(rows):
+        for c in range(cols):
+            tiles.append((
+                west  + c       * dlon,
+                south + r       * dlat,
+                west  + (c + 1) * dlon,
+                south + (r + 1) * dlat,
+            ))
+    return tiles
+
+
+def _mosaic_dem_tiles(tile_bytes_list: list[bytes]) -> bytes:
+    """Merge a list of GeoTIFF byte blobs into a single GeoTIFF using rasterio.merge."""
+    from rasterio.merge import merge as rasterio_merge  # local import — keeps startup fast
+
+    mem_files: list[MemoryFile] = []
+    datasets: list[Any] = []
+    try:
+        for raw in tile_bytes_list:
+            mf = MemoryFile(raw)
+            mem_files.append(mf)
+            datasets.append(mf.open())
+
+        mosaic_data, mosaic_transform = rasterio_merge(datasets)
+        profile = datasets[0].profile.copy()
+        profile.update({
+            "height":    mosaic_data.shape[1],
+            "width":     mosaic_data.shape[2],
+            "transform": mosaic_transform,
+        })
+
+        with MemoryFile() as out_mf:
+            with out_mf.open(**profile) as out_ds:
+                out_ds.write(mosaic_data)
+            result = out_mf.read()
+
+        logger.info(
+            "DEM tile mosaic complete: %d tiles merged → %d bytes",
+            len(tile_bytes_list), len(result),
+        )
+        return result
+    finally:
+        for ds in datasets:
+            try:
+                ds.close()
+            except Exception:  # pragma: no cover
+                pass
+        for mf in mem_files:
+            try:
+                mf.close()
+            except Exception:  # pragma: no cover
+                pass
+
+
+def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30") -> bytes:
+    """Download a DEM for *area_polygon* from OpenTopography.
+
+    If ``OPENTOPO_TILE_KM2`` is set in the environment, large requests are
+    automatically split into smaller tiles (each ≤ that many km²) and merged
+    using rasterio after download.  This lets restricted-network servers
+    (where long-lived TCP connections are cut by a campus firewall) download
+    large areas by making many small short-lived requests instead.
+
+    Set in ``.env`` on the SSH server::
+
+        OPENTOPO_TILE_KM2=0.4
+    """
+    west, south, east, north = validate_area_polygon(area_polygon)
+    center_lat = (north + south) / 2
+    area_km2   = (east - west) * 111.32 * math.cos(math.radians(center_lat)) * (north - south) * 110.574
+
+    api_key = _configured_api_key()
+    if not api_key:
+        logger.error("DEM request blocked: API_Key is not configured")
+        raise ValueError("OpenTopography API key is missing. Set API_Key in the project .env file.")
+    if dataset not in {"COP30", "SRTMGL1", "AW3D30"}:
+        logger.error("DEM request blocked: unsupported dataset=%s", dataset)
+        raise ValueError("Unsupported global elevation dataset.")
+
+    logger.info(
+        "DEM request started: dataset=%s bbox=[%.5f, %.5f, %.5f, %.5f] bbox_area=%.2f km^2",
+        dataset, west, south, east, north, area_km2,
+    )
+
+    # ── Tiled download (for restricted-network servers) ──────────────────────
+    if _TILE_KM2 > 0 and area_km2 > _TILE_KM2:
+        tiles = _split_bbox(west, south, east, north, _TILE_KM2)
+        logger.info(
+            "DEM tiled download: area=%.2f km² split into %d tiles (max %.2f km² each)",
+            area_km2, len(tiles), _TILE_KM2,
+        )
+        tile_bytes_list: list[bytes] = []
+        for i, (tw, ts, te, tn) in enumerate(tiles, 1):
+            t_area = (te - tw) * 111.32 * math.cos(math.radians((tn + ts) / 2)) * (tn - ts) * 110.574
+            logger.info(
+                "DEM tile %d/%d: bbox=[%.5f, %.5f, %.5f, %.5f] area=%.3f km²",
+                i, len(tiles), tw, ts, te, tn, t_area,
+            )
+            tile_bytes_list.append(
+                _fetch_single_tile(tw, ts, te, tn, dataset, api_key)
+            )
+        return _mosaic_dem_tiles(tile_bytes_list)
+
+    # ── Direct single-request download ───────────────────────────────────────
+    return _fetch_single_tile(west, south, east, north, dataset, api_key)
 
 
 def _inside_or_on_edge(point: Tuple[float, float], polygon: Sequence[Tuple[float, float]]) -> bool:

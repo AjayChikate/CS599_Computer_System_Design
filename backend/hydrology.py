@@ -5,6 +5,15 @@ import math
 from typing import Any, Sequence, Tuple
 
 import numpy as np
+
+# ---------------------------------------------------------------------------
+# NumPy ≥ 2.0 compatibility — pysheds still calls np.in1d which was removed.
+# np.isin is a strict superset: for 1-D arrays the return shape is identical.
+# This patch must happen before pysheds is imported (module-load time).
+# ---------------------------------------------------------------------------
+if not hasattr(np, "in1d"):
+    np.in1d = np.isin  # type: ignore[attr-defined]
+
 from pysheds.grid import Grid
 from rasterio.features import geometry_mask, shapes
 from rasterio.io import MemoryFile

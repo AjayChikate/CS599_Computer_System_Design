@@ -38,12 +38,12 @@ logger = logging.getLogger(__name__)
 try:
     from .config import MAX_UPLOAD_BYTES
     from .service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
-    from .opentopography import analyze_dem_area
+    from .opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
     from .rainfall import fetch_historical_rainfall_for_points
 except ImportError:
     from config import MAX_UPLOAD_BYTES
     from service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
-    from opentopography import analyze_dem_area
+    from opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
     from rainfall import fetch_historical_rainfall_for_points
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -112,9 +112,18 @@ def serve_index():
         content={
             "service": "Pond Catchment Analysis API",
             "docs": "/docs",
-            "routes": ["POST /analyzeContour", "POST /api/analyzeDemArea", "POST /api/fetchRainfall"],
+            "routes": ["POST /analyzeContour", "POST /api/analyzeDemArea", "POST /api/fetchRainfall", "GET /api/config"],
         },
     )
+
+
+@app.get("/api/config")
+def get_config() -> dict[str, Any]:
+    return {
+        "max_area_km2": MAX_AREA_KM2,
+        "tile_km2": _TILE_KM2,
+    }
+
 
 
 # ---------------------------------------------------------------------------

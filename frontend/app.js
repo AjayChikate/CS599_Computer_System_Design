@@ -12,15 +12,32 @@
 "use strict";
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants & Config
 // ---------------------------------------------------------------------------
-const MAX_AREA_KM2 = 0.5;       // Must match backend/opentopography.py
+let maxAreaKm2      = 25.0;     // Dynamically synced with /api/config
 const INDIA_CENTER  = [21.25, 81.29];
 const INDIA_ZOOM    = 6;
 const RUNOFF_COEFF  = 0.20;     // Must match backend/rainfall.py
 
 const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const CANDIDATE_COLORS = ["#3b82f6","#f59e0b","#8b5cf6","#10b981","#ef4444","#ec4899","#06b6d4"];
+
+async function loadConfig() {
+  try {
+    const res = await fetch("/api/config");
+    if (res.ok) {
+      const cfg = await res.json();
+      if (typeof cfg.max_area_km2 === "number") {
+        maxAreaKm2 = cfg.max_area_km2;
+        const hintEl = document.getElementById("max-area-hint");
+        if (hintEl) hintEl.textContent = `${maxAreaKm2} km²`;
+      }
+    }
+  } catch (err) {
+    console.debug("Config sync fallback to default:", err);
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -136,12 +153,12 @@ function updatePolygonState(latlngs) {
   state.polygon  = latlngsToClosedRing(latlngs);
   state.areaKm2  = area;
   updateAreaDisplay(area);
-  const overLimit = area > MAX_AREA_KM2;
+  const overLimit = area > maxAreaKm2;
   setAnalyzeEnabled(!overLimit && canAnalyze());
   showClearBtn(true);
   if (overLimit) {
     setStatus(
-      `Area ${area.toFixed(2)} km² exceeds the ${MAX_AREA_KM2} km² server limit — shrink the polygon.`,
+      `Area ${area.toFixed(2)} km² exceeds the ${maxAreaKm2} km² limit — shrink the polygon.`,
       "error", false
     );
   } else {
@@ -164,7 +181,7 @@ function updateAreaDisplay(area) {
     return;
   }
 
-  const over = area > MAX_AREA_KM2;
+  const over = area > maxAreaKm2;
   const text = `${area.toFixed(2)} km² ${over ? "⚠ too large" : "✓ OK"}`;
   const cls  = over ? "over-limit" : "ok";
 
@@ -236,7 +253,7 @@ function switchMode(mode) {
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.mode === mode));
   document.getElementById("dem-panel").classList.toggle("hidden",    mode !== "dem");
   document.getElementById("upload-panel").classList.toggle("hidden", mode !== "upload");
-  setAnalyzeEnabled(canAnalyze() && !!state.polygon && state.areaKm2 <= MAX_AREA_KM2);
+  setAnalyzeEnabled(canAnalyze() && !!state.polygon && state.areaKm2 <= maxAreaKm2);
   clearResults();
   clearStatus();
 }
@@ -260,7 +277,7 @@ function clearPolygon() {
 // ---------------------------------------------------------------------------
 async function analyzeDem() {
   if (!state.polygon) { setStatus("Draw a polygon on the map first.", "error", false); return; }
-  if (state.areaKm2 > MAX_AREA_KM2) {
+  if (state.areaKm2 > maxAreaKm2) {
     setStatus(`Area ${state.areaKm2.toFixed(2)} km² is too large. Draw a smaller polygon.`, "error", false);
     return;
   }
@@ -585,6 +602,7 @@ function formatArea(m2) {
 // ---------------------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
+  loadConfig();
 
   // Mode tab switch
   document.querySelectorAll(".tab").forEach(tab => {
