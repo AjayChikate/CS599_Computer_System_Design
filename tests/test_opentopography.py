@@ -176,7 +176,7 @@ def test_global_dem_request_uses_documented_parameters_and_redacts_key(
     assert captured["params"]["demtype"] == "COP30"
     assert captured["params"]["outputFormat"] == "GTiff"
     assert captured["params"]["API_Key"] == "test-configured-key"
-    assert captured["timeout"] == (10, 120)
+    assert captured["timeout"] == (30, 180)
     assert "DEM request started" in caplog.text
     assert "test-configured-key" not in caplog.text
 

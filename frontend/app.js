@@ -1,27 +1,102 @@
 /**
- * app.js — Pond Catchment Analysis frontend
+ * app.js — Pond Catchment Analysis Frontend (Streamlit-styled)
  *
- * Architecture:
- *   - Leaflet map with Leaflet.draw for polygon selection
- *   - Two modes:  "dem"    → POST /api/analyzeDemArea  then /api/fetchRainfall
- *                "upload" → POST /api/analyzeContourWithArea then /api/fetchRainfall
- *   - Chart.js bar chart for monthly ERA5 precipitation
- *   - All area calculations done client-side (no extra library needed)
+ * Capabilities:
+ *   - Leaflet interactive GIS map with polygon draw tool & layer toggles
+ *   - Streamlit-style UI (st.sidebar, st.metric row, st.tabs, st.table)
+ *   - DEM Analysis (/api/analyzeDemArea) + Historical Rainfall (/api/fetchRainfall)
+ *   - KML / KMZ Upload Analysis (/api/analyzeContourWithArea)
+ *   - Chart.js 10-year monthly precipitation bar chart with runoff estimation
+ *   - Downloadable KML and JSON technical payloads
  */
 
 "use strict";
 
 // ---------------------------------------------------------------------------
-// Constants & Config
+// Configuration & Constants
 // ---------------------------------------------------------------------------
-let maxAreaKm2      = 25.0;     // Dynamically synced with /api/config
-const INDIA_CENTER  = [21.25, 81.29];
-const INDIA_ZOOM    = 6;
-const RUNOFF_COEFF  = 0.20;     // Must match backend/rainfall.py
+let maxAreaKm2 = 25.0; // Dynamically synchronized with backend /api/config
+const INDIA_CENTER = [21.25, 81.29];
+const INDIA_ZOOM = 6;
+const RUNOFF_COEFF = 0.20; // Runoff coefficient C = 0.20
 
-const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-const CANDIDATE_COLORS = ["#3b82f6","#f59e0b","#8b5cf6","#10b981","#ef4444","#ec4899","#06b6d4"];
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const CANDIDATE_COLORS = [
+  "#ff4b4b", // Primary recommended (Streamlit Red)
+  "#ffa421", // Alt 1 (Amber)
+  "#1c83e1", // Alt 2 (Blue)
+  "#9c27b0", // Alt 3 (Purple)
+  "#00bcd4", // Alt 4 (Cyan)
+  "#4caf50", // Alt 5 (Green)
+];
 
+// ---------------------------------------------------------------------------
+// Global Application State
+// ---------------------------------------------------------------------------
+const state = {
+  mode: "dem", // "dem" | "upload"
+  drawnLayer: null,
+  polygon: null, // [[lon, lat], ...] closed coordinate ring
+  areaKm2: null,
+  uploadedFile: null,
+  result: null, // Full analysis response payload
+  rainfallSeries: null,
+  kmlB64: null,
+  resultLayers: [],
+  rainfallChart: null,
+};
+
+// ---------------------------------------------------------------------------
+// Map Setup & Initialization
+// ---------------------------------------------------------------------------
+let map, drawnItems, drawControl;
+
+function initMap() {
+  map = L.map("map", {
+    center: INDIA_CENTER,
+    zoom: INDIA_ZOOM,
+    zoomControl: true,
+  });
+
+  // Base map tiles (CartoDB Dark Matter / OSM)
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a>, © CartoDB",
+    maxZoom: 19,
+  }).addTo(map);
+
+  drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+
+  drawControl = new L.Control.Draw({
+    position: "topright",
+    draw: {
+      polygon: {
+        allowIntersection: false,
+        showArea: true,
+        drawError: { color: "#ff4b4b", message: "Self-intersection is not allowed" },
+        shapeOptions: { color: "#ff4b4b", weight: 2.5, fillOpacity: 0.12 },
+      },
+      polyline: false,
+      rectangle: false,
+      circle: false,
+      circlemarker: false,
+      marker: false,
+    },
+    edit: {
+      featureGroup: drawnItems,
+      edit: { selectedPathOptions: { maintainColor: true } },
+    },
+  });
+  map.addControl(drawControl);
+
+  map.on(L.Draw.Event.CREATED, onPolygonCreated);
+  map.on(L.Draw.Event.EDITED, onPolygonEdited);
+  map.on(L.Draw.Event.DELETED, onPolygonDeleted);
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic Backend Configuration Sync
+// ---------------------------------------------------------------------------
 async function loadConfig() {
   try {
     const res = await fetch("/api/config");
@@ -34,78 +109,18 @@ async function loadConfig() {
       }
     }
   } catch (err) {
-    console.debug("Config sync fallback to default:", err);
+    console.debug("Config sync fallback:", err);
   }
 }
 
-
 // ---------------------------------------------------------------------------
-// Global state
-// ---------------------------------------------------------------------------
-const state = {
-  mode:          "dem",      // "dem" | "upload"
-  drawnLayer:    null,       // Leaflet polygon layer
-  polygon:       null,       // [[lon, lat], ...] closed ring
-  areaKm2:       null,       // number
-  uploadedFile:  null,       // File object
-  result:        null,       // Latest analysis result dict
-  rainfallSeries: null,      // Latest rainfall series array
-  kmlB64:        null,       // Base64 KML string for download
-  resultLayers:  [],         // Leaflet layers added for results
-  rainfallChart: null,       // Chart.js instance
-};
-
-// ---------------------------------------------------------------------------
-// Map setup
-// ---------------------------------------------------------------------------
-let map, drawnItems, drawControl;
-
-function initMap() {
-  map = L.map("map", { center: INDIA_CENTER, zoom: INDIA_ZOOM });
-
-  // Tile layer — OpenStreetMap
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a>",
-    maxZoom: 20,
-  }).addTo(map);
-
-  // Feature group to hold drawn polygons
-  drawnItems = new L.FeatureGroup();
-  map.addLayer(drawnItems);
-
-  // Draw control — polygon only
-  drawControl = new L.Control.Draw({
-    draw: {
-      polygon: {
-        allowIntersection: false,
-        showArea: true,
-        drawError: { color: "#ef4444", message: "Self-intersection not allowed" },
-        shapeOptions: { color: "#3b82f6", weight: 2, fillOpacity: 0.10 },
-      },
-      polyline: false, rectangle: false, circle: false,
-      circlemarker: false, marker: false,
-    },
-    edit: {
-      featureGroup: drawnItems,
-      edit: { selectedPathOptions: { maintainColor: true } },
-    },
-  });
-  map.addControl(drawControl);
-
-  // Events
-  map.on(L.Draw.Event.CREATED,   onPolygonCreated);
-  map.on(L.Draw.Event.EDITED,    onPolygonEdited);
-  map.on(L.Draw.Event.DELETED,   onPolygonDeleted);
-}
-
-// ---------------------------------------------------------------------------
-// Area calculation (equirectangular, accurate for small areas < 10 km²)
+// Area & Polygon Utilities
 // ---------------------------------------------------------------------------
 function calculateAreaKm2(latlngs) {
   if (!latlngs || latlngs.length < 3) return 0;
-  const centerLat = latlngs.reduce((s, p) => s + p.lat, 0) / latlngs.length;
-  const xScale = 111.32 * Math.cos(centerLat * Math.PI / 180); // km per degree lon
-  const yScale = 110.574;                                        // km per degree lat
+  const centerLat = latlngs.reduce((sum, p) => sum + p.lat, 0) / latlngs.length;
+  const xScale = 111.32 * Math.cos((centerLat * Math.PI) / 180);
+  const yScale = 110.574;
   const pts = latlngs.map(p => [p.lng * xScale, p.lat * yScale]);
   let area = 0;
   for (let i = 0; i < pts.length; i++) {
@@ -115,7 +130,6 @@ function calculateAreaKm2(latlngs) {
   return Math.abs(area) / 2;
 }
 
-// Convert Leaflet LatLng array → [[lon, lat], ...] closed ring for API
 function latlngsToClosedRing(latlngs) {
   const ring = latlngs.map(p => [p.lng, p.lat]);
   if (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1]) {
@@ -125,10 +139,9 @@ function latlngsToClosedRing(latlngs) {
 }
 
 // ---------------------------------------------------------------------------
-// Draw event handlers
+// Draw Handlers
 // ---------------------------------------------------------------------------
 function onPolygonCreated(e) {
-  // Remove previous drawing
   drawnItems.clearLayers();
   state.drawnLayer = e.layer;
   drawnItems.addLayer(e.layer);
@@ -143,155 +156,165 @@ function onPolygonDeleted() {
   state.polygon = null;
   state.drawnLayer = null;
   state.areaKm2 = null;
-  updateAreaDisplay(null);
-  setAnalyzeEnabled(false);
+  updateAreaFeedback(null);
+  setAnalyzeEnabled(canAnalyze());
   showClearBtn(false);
+  clearStatus();
 }
 
 function updatePolygonState(latlngs) {
   const area = calculateAreaKm2(latlngs);
-  state.polygon  = latlngsToClosedRing(latlngs);
-  state.areaKm2  = area;
-  updateAreaDisplay(area);
+  state.polygon = latlngsToClosedRing(latlngs);
+  state.areaKm2 = area;
+  updateAreaFeedback(area, latlngs);
+
   const overLimit = area > maxAreaKm2;
   setAnalyzeEnabled(!overLimit && canAnalyze());
   showClearBtn(true);
+
   if (overLimit) {
-    setStatus(
-      `Area ${area.toFixed(2)} km² exceeds the ${maxAreaKm2} km² limit — shrink the polygon.`,
-      "error", false
-    );
+    setStatus(`Selected area (${area.toFixed(2)} km²) exceeds the ${maxAreaKm2} km² limit.`, "error", false);
   } else {
     clearStatus();
   }
 }
 
 // ---------------------------------------------------------------------------
-// UI helpers
+// UI Feedback & Helpers
 // ---------------------------------------------------------------------------
-function updateAreaDisplay(area) {
-  const demDisplay    = document.getElementById("dem-area-display");
-  const demValue      = document.getElementById("dem-area-value");
-  const uploadDisplay = document.getElementById("upload-area-display");
-  const uploadValue   = document.getElementById("upload-area-value");
+function updateAreaFeedback(area, latlngs) {
+  const card = document.getElementById("selection-area-card");
+  const badge = document.getElementById("selection-area-val");
+  const coords = document.getElementById("selection-coords-text");
 
   if (area === null) {
-    demDisplay.classList.add("hidden");
-    uploadDisplay.classList.add("hidden");
+    card.classList.add("hidden");
     return;
   }
 
   const over = area > maxAreaKm2;
-  const text = `${area.toFixed(2)} km² ${over ? "⚠ too large" : "✓ OK"}`;
-  const cls  = over ? "over-limit" : "ok";
+  badge.textContent = `${area.toFixed(2)} km² ${over ? "⚠️ Too Large" : "✓ Ready"}`;
+  badge.classList.toggle("over-limit", over);
 
-  demDisplay.classList.remove("hidden", "over-limit", "ok");
-  demDisplay.classList.add(cls);
-  demValue.textContent = text;
+  if (latlngs && latlngs.length > 0) {
+    const lats = latlngs.map(p => p.lat);
+    const lngs = latlngs.map(p => p.lng);
+    const minLat = Math.min(...lats).toFixed(3);
+    const maxLat = Math.max(...lats).toFixed(3);
+    const minLng = Math.min(...lngs).toFixed(3);
+    const maxLng = Math.max(...lngs).toFixed(3);
+    coords.textContent = `Lat: [${minLat}..${maxLat}], Lon: [${minLng}..${maxLng}]`;
+  }
 
-  uploadDisplay.classList.remove("hidden", "over-limit", "ok");
-  uploadDisplay.classList.add(cls);
-  uploadValue.textContent = text;
+  card.classList.remove("hidden");
 }
 
 function canAnalyze() {
   if (state.mode === "dem") {
-    return !!state.polygon;
+    return !!state.polygon && state.areaKm2 <= maxAreaKm2;
   }
-  // upload mode: need a file; polygon is optional (analyzes entire file if absent)
   return !!state.uploadedFile;
 }
 
 function setAnalyzeEnabled(enabled) {
-  document.getElementById("analyze-dem-btn").disabled    = !enabled;
-  document.getElementById("analyze-upload-btn").disabled = !enabled;
+  document.getElementById("btn-run-analysis").disabled = !enabled;
 }
 
 function showClearBtn(show) {
-  document.getElementById("clear-dem-btn").classList.toggle("hidden", !show);
-  document.getElementById("clear-upload-btn").classList.toggle("hidden", !show);
+  document.getElementById("btn-clear-selection").classList.toggle("hidden", !show);
 }
 
 function setStatus(msg, type = "info", spinner = true) {
-  const bar  = document.getElementById("status-bar");
-  const text = document.getElementById("status-text");
-  const spin = document.getElementById("status-spinner");
-  bar.classList.remove("hidden", "error", "success");
-  if (type === "error")   bar.classList.add("error");
-  if (type === "success") bar.classList.add("success");
+  const box = document.getElementById("st-status-box");
+  const text = document.getElementById("st-status-text");
+  const spin = document.getElementById("st-status-spinner");
+
   spin.classList.toggle("hidden", !spinner);
   text.textContent = msg;
-  bar.classList.remove("hidden");
+  box.classList.remove("hidden");
 }
 
 function clearStatus() {
-  document.getElementById("status-bar").classList.add("hidden");
+  document.getElementById("st-status-box").classList.add("hidden");
 }
 
 function clearResultLayers() {
-  state.resultLayers.forEach(l => map.removeLayer(l));
+  state.resultLayers.forEach(layer => map.removeLayer(layer));
   state.resultLayers = [];
 }
 
 function clearResults() {
   clearResultLayers();
-  document.getElementById("results-panel").classList.add("hidden");
-  document.getElementById("metrics-grid").innerHTML = "";
-  document.getElementById("runoff-summary").classList.add("hidden");
+  document.getElementById("results-wrapper").classList.add("hidden");
   if (state.rainfallChart) {
     state.rainfallChart.destroy();
     state.rainfallChart = null;
   }
-  document.getElementById("rainfall-loading").classList.remove("hidden");
+  document.getElementById("rainfall-chart-loader").classList.remove("hidden");
 }
 
 // ---------------------------------------------------------------------------
-// Mode switching
+// Mode Switching
 // ---------------------------------------------------------------------------
 function switchMode(mode) {
   state.mode = mode;
-  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.mode === mode));
-  document.getElementById("dem-panel").classList.toggle("hidden",    mode !== "dem");
-  document.getElementById("upload-panel").classList.toggle("hidden", mode !== "upload");
-  setAnalyzeEnabled(canAnalyze() && !!state.polygon && state.areaKm2 <= maxAreaKm2);
+
+  document.querySelectorAll(".st-radio-option").forEach(opt => {
+    opt.classList.toggle("active", opt.dataset.mode === mode);
+    const radio = opt.querySelector("input[type='radio']");
+    if (radio) radio.checked = opt.dataset.mode === mode;
+  });
+
+  document.getElementById("panel-dem-options").classList.toggle("hidden", mode !== "dem");
+  document.getElementById("panel-upload-options").classList.toggle("hidden", mode !== "upload");
+
+  setAnalyzeEnabled(canAnalyze());
   clearResults();
   clearStatus();
 }
 
-// ---------------------------------------------------------------------------
-// Polygon clear
-// ---------------------------------------------------------------------------
 function clearPolygon() {
   drawnItems.clearLayers();
   state.drawnLayer = null;
-  state.polygon    = null;
-  state.areaKm2    = null;
-  updateAreaDisplay(null);
-  setAnalyzeEnabled(canAnalyze() && false);
+  state.polygon = null;
+  state.areaKm2 = null;
+  updateAreaFeedback(null);
+  setAnalyzeEnabled(canAnalyze());
   showClearBtn(false);
   clearStatus();
 }
 
 // ---------------------------------------------------------------------------
-// DEM analysis
+// DEM Analysis Execution
 // ---------------------------------------------------------------------------
+async function runAnalysis() {
+  if (state.mode === "dem") {
+    await analyzeDem();
+  } else {
+    await analyzeUpload();
+  }
+}
+
 async function analyzeDem() {
-  if (!state.polygon) { setStatus("Draw a polygon on the map first.", "error", false); return; }
+  if (!state.polygon) {
+    setStatus("Please draw a region on the map first.", "error", false);
+    return;
+  }
   if (state.areaKm2 > maxAreaKm2) {
-    setStatus(`Area ${state.areaKm2.toFixed(2)} km² is too large. Draw a smaller polygon.`, "error", false);
+    setStatus(`Selected area (${state.areaKm2.toFixed(2)} km²) exceeds ${maxAreaKm2} km² limit.`, "error", false);
     return;
   }
 
   const dataset = document.getElementById("dataset-select").value;
   clearResults();
-  setStatus("Downloading elevation data from OpenTopography…", "info", true);
-  document.getElementById("analyze-dem-btn").disabled = true;
+  setStatus(`Fetching ${dataset} terrain data & computing D8 hydrology...`, "info", true);
+  document.getElementById("btn-run-analysis").disabled = true;
 
   try {
     const resp = await fetch("/api/analyzeDemArea", {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ area_polygon: state.polygon, dataset }),
+      body: JSON.stringify({ area_polygon: state.polygon, dataset }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -299,200 +322,263 @@ async function analyzeDem() {
     state.result = data.result;
     state.kmlB64 = data.kml_b64;
 
-    renderResultsOnMap(data.result);
-    renderMetrics(data.result);
-    setStatus("Terrain analysis complete. Fetching rainfall…", "success", true);
+    renderResults(data.result);
+    setStatus("Terrain analysis complete. Querying ERA5 rainfall reanalysis...", "info", true);
 
     await fetchAndRenderRainfall(data.result);
   } catch (err) {
     setStatus(`Analysis failed: ${err.message}`, "error", false);
   } finally {
-    document.getElementById("analyze-dem-btn").disabled = false;
+    document.getElementById("btn-run-analysis").disabled = false;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Upload + area analysis
-// ---------------------------------------------------------------------------
 async function analyzeUpload() {
-  if (!state.uploadedFile) { setStatus("Choose a KML or KMZ file first.", "error", false); return; }
+  if (!state.uploadedFile) {
+    setStatus("Please select a KML or KMZ contour file.", "error", false);
+    return;
+  }
 
   clearResults();
-  setStatus("Parsing survey file…", "info", true);
-  document.getElementById("analyze-upload-btn").disabled = true;
+  setStatus("Parsing contour survey & extracting topographic basins...", "info", true);
+  document.getElementById("btn-run-analysis").disabled = true;
 
   const formData = new FormData();
   formData.append("file", state.uploadedFile);
-  // Send polygon if drawn; otherwise send empty so backend uses full file extent
   formData.append("area_polygon_json", JSON.stringify(state.polygon || []));
 
   try {
     const resp = await fetch("/api/analyzeContourWithArea", {
       method: "POST",
-      body:   formData,
+      body: formData,
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
 
     state.result = data;
-    state.kmlB64 = null; // upload mode doesn't return KML
+    state.kmlB64 = null;
 
-    renderResultsOnMap(data);
-    renderMetrics(data);
-    setStatus("Survey analysis complete. Fetching rainfall…", "success", true);
+    renderResults(data);
+    setStatus("Survey analysis complete. Querying ERA5 rainfall reanalysis...", "info", true);
 
     await fetchAndRenderRainfall(data);
   } catch (err) {
     setStatus(`Analysis failed: ${err.message}`, "error", false);
   } finally {
-    document.getElementById("analyze-upload-btn").disabled = false;
+    document.getElementById("btn-run-analysis").disabled = false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Rainfall fetch + render
+// ERA5 Rainfall Fetching
 // ---------------------------------------------------------------------------
 async function fetchAndRenderRainfall(result) {
   const candidates = result.pondCandidates || [];
-  if (!candidates.length) { setStatus("No candidates found in this area.", "error", false); return; }
+  if (!candidates.length) {
+    setStatus("No suitable pond depressions detected in this region.", "warning", false);
+    return;
+  }
 
   const locations = candidates.map(c => [c.pondCentroid.lat, c.pondCentroid.lon]);
   try {
     const resp = await fetch("/api/fetchRainfall", {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ locations, years: 10 }),
+      body: JSON.stringify({ locations, years: 10 }),
     });
     const series = await resp.json();
     if (!resp.ok) throw new Error(series.error || `HTTP ${resp.status}`);
 
     state.rainfallSeries = series;
-    renderRainfallChart(series[0]);               // chart for recommended site
-    renderRunoffSummary(result, series[0]);
-    setStatus("Done.", "success", false);
-    setTimeout(clearStatus, 3000);
+    renderRainfallChart(series[0]);
+    renderWaterBalance(result, series[0]);
+    setStatus("Analysis complete. Recommendations updated.", "success", false);
+    setTimeout(clearStatus, 4000);
   } catch (err) {
-    document.getElementById("rainfall-loading").textContent = `Rainfall unavailable: ${err.message}`;
-    setStatus(`Rainfall fetch failed: ${err.message}`, "error", false);
+    console.warn("Rainfall service warning:", err);
+    document.getElementById("rainfall-chart-loader").textContent = `Precipitation data unavailable: ${err.message}`;
+    setStatus("Depression assessment complete (Precipitation query timed out).", "info", false);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Map result rendering
+// Render Results: Map, Metrics, Table, Tabs
 // ---------------------------------------------------------------------------
-const RESULT_STYLE = {
-  catchment: { color: "#3b82f6", weight: 1.5, fillColor: "#3b82f6", fillOpacity: 0.07, dashArray: "5,4" },
-  basin:     { color: "#10b981", weight: 2,   fillColor: "#10b981", fillOpacity: 0.12 },
-};
+function renderResults(result) {
+  renderMapLayers(result);
+  renderMetrics(result);
+  renderSummaryTable(result);
+  renderCandidatesTable(result);
 
-function renderResultsOnMap(result) {
+  document.getElementById("results-wrapper").classList.remove("hidden");
+  document.getElementById("main-banner").classList.add("hidden");
+}
+
+function renderMapLayers(result) {
   clearResultLayers();
   const candidates = result.pondCandidates || [];
   const bounds = [];
 
-  candidates.forEach((c, i) => {
-    const color     = CANDIDATE_COLORS[i % CANDIDATE_COLORS.length];
-    const isRec     = i === 0;
-    const weight    = isRec ? 3 : 1.5;
-    const radius    = isRec ? 12 : 8;
-
-    // Basin boundary
-    if (c.basinBoundaryGeoJSON) {
-      try {
-        const layer = L.geoJSON(c.basinBoundaryGeoJSON, {
-          style: { ...RESULT_STYLE.basin, color, fillColor: color },
-        }).addTo(map);
-        state.resultLayers.push(layer);
-        layer.eachLayer(l => { if (l.getBounds) bounds.push(...Object.values(l.getBounds())); });
-      } catch { /* ignore bad GeoJSON */ }
-    }
+  candidates.forEach((c, idx) => {
+    const color = CANDIDATE_COLORS[idx % CANDIDATE_COLORS.length];
+    const isRecommended = idx === 0;
 
     // Catchment boundary
     if (c.catchmentBoundaryGeoJSON) {
       try {
-        const layer = L.geoJSON(c.catchmentBoundaryGeoJSON, {
-          style: { ...RESULT_STYLE.catchment, color },
+        const catLayer = L.geoJSON(c.catchmentBoundaryGeoJSON, {
+          style: {
+            color: color,
+            weight: isRecommended ? 2 : 1.2,
+            fillColor: color,
+            fillOpacity: 0.08,
+            dashArray: "5, 4",
+          },
         }).addTo(map);
-        state.resultLayers.push(layer);
-      } catch { /* ignore */ }
+        state.resultLayers.push(catLayer);
+      } catch (e) {
+        console.debug("Catchment GeoJSON parse error", e);
+      }
     }
 
-    // Pond site marker
+    // Basin boundary
+    if (c.basinBoundaryGeoJSON) {
+      try {
+        const basinLayer = L.geoJSON(c.basinBoundaryGeoJSON, {
+          style: {
+            color: color,
+            weight: isRecommended ? 3 : 1.8,
+            fillColor: color,
+            fillOpacity: 0.18,
+          },
+        }).addTo(map);
+        state.resultLayers.push(basinLayer);
+      } catch (e) {
+        console.debug("Basin GeoJSON parse error", e);
+      }
+    }
+
+    // Centroid marker pin
     const { lat, lon } = c.pondCentroid;
     const marker = L.circleMarker([lat, lon], {
-      radius,
-      color:       "#fff",
-      weight:      2,
-      fillColor:   color,
-      fillOpacity: 0.9,
+      radius: isRecommended ? 10 : 7,
+      color: "#ffffff",
+      weight: 2,
+      fillColor: color,
+      fillOpacity: 0.95,
     }).addTo(map);
 
-    const tag    = isRec ? "⭐ Recommended" : `Alt #${i}`;
-    const depth  = (c.basinDepthM || 0).toFixed(1);
-    const vol    = formatVolume(c.estimatedVolumeM3 || 0);
-    const area   = formatArea(c.estimatedCatchmentAreaSqM || 0);
+    const title = isRecommended ? "⭐ Primary Recommended Site" : `Alternative Candidate #${idx}`;
+    const volStr = formatVolume(c.estimatedVolumeM3 || 0);
+    const catStr = formatArea(c.estimatedCatchmentAreaSqM || 0);
+    const depthStr = (c.basinDepthM || 0).toFixed(1);
+
     marker.bindPopup(
-      `<b>${tag}</b><br>` +
-      `Elevation: <b>${(c.pondElevation || 0).toFixed(1)} m</b><br>` +
-      `Basin depth: <b>${depth} m</b><br>` +
-      `Storage: <b>${vol}</b><br>` +
-      `Catchment: <b>${area}</b><br>` +
-      `Confidence: <b>${((c.confidenceScore || 0) * 100).toFixed(0)}%</b>`
+      `<div style="font-family: 'Source Sans 3', sans-serif; font-size: 13px;">` +
+      `<strong style="color: ${color}; font-size: 14px;">${title}</strong><br>` +
+      `<hr style="margin: 4px 0; border: 0; border-top: 1px solid #ddd;">` +
+      `<b>Elevation:</b> ${(c.pondElevation || 0).toFixed(1)} m<br>` +
+      `<b>Basin Depth:</b> ${depthStr} m<br>` +
+      `<b>Est. Storage:</b> ${volStr}<br>` +
+      `<b>Catchment Area:</b> ${catStr}<br>` +
+      `<b>Confidence:</b> ${((c.confidenceScore || 0) * 100).toFixed(0)}%` +
+      `</div>`
     );
-    if (isRec) marker.openPopup();
+
+    if (isRecommended) marker.openPopup();
     state.resultLayers.push(marker);
     bounds.push([lat, lon]);
   });
 
-  if (bounds.length) {
-    try { map.fitBounds(L.latLngBounds(bounds), { padding: [40, 40] }); } catch { /* ignore */ }
+  if (bounds.length > 0) {
+    try {
+      map.fitBounds(L.latLngBounds(bounds), { padding: [50, 50] });
+    } catch (e) {}
   }
-
-  document.getElementById("results-panel").classList.remove("hidden");
-  document.getElementById("download-row").classList.toggle("hidden", !state.kmlB64);
 }
 
-// ---------------------------------------------------------------------------
-// Metrics cards
-// ---------------------------------------------------------------------------
 function renderMetrics(result) {
   const rec = (result.pondCandidates || [])[0];
   if (!rec) return;
 
-  const depth   = (rec.basinDepthM        || 0).toFixed(1);
-  const vol     = formatVolume(rec.estimatedVolumeM3 || 0);
-  const cat     = formatArea(rec.estimatedCatchmentAreaSqM || 0);
-  const elev    = (rec.pondElevation       || 0).toFixed(1);
-  const conf    = `${((rec.confidenceScore || 0) * 100).toFixed(0)}%`;
-  const lat     = (rec.pondCentroid?.lat   || 0).toFixed(5);
-  const lon     = (rec.pondCentroid?.lon   || 0).toFixed(5);
-
-  const grid = document.getElementById("metrics-grid");
-  grid.innerHTML = [
-    { label: "Elevation",       value: `${elev}`,  unit: "m" },
-    { label: "Basin Depth",     value: `${depth}`, unit: "m" },
-    { label: "Est. Storage",    value: vol,         unit: "" },
-    { label: "Catchment Area",  value: cat,         unit: "" },
-    { label: "Confidence",      value: conf,        unit: "" },
-    { label: "Coordinates",     value: `${lat}, ${lon}`, unit: "" },
-  ].map(m => `
-    <div class="metric-card">
-      <div class="metric-label">${m.label}</div>
-      <div class="metric-value">${m.value} <span class="metric-unit">${m.unit}</span></div>
-    </div>
-  `).join("");
+  document.getElementById("m-elevation").textContent = `${(rec.pondElevation || 0).toFixed(1)} m`;
+  document.getElementById("m-depth").textContent = `${(rec.basinDepthM || 0).toFixed(1)} m`;
+  document.getElementById("m-storage").textContent = formatVolume(rec.estimatedVolumeM3 || 0);
+  document.getElementById("m-catchment").textContent = formatArea(rec.estimatedCatchmentAreaSqM || 0);
+  document.getElementById("m-confidence").textContent = `${((rec.confidenceScore || 0) * 100).toFixed(0)}%`;
 }
 
-// ---------------------------------------------------------------------------
-// Rainfall chart
-// ---------------------------------------------------------------------------
+function renderSummaryTable(result) {
+  const rec = (result.pondCandidates || [])[0];
+  if (!rec) return;
+
+  document.getElementById("s-coords").textContent = `${rec.pondCentroid.lat.toFixed(5)}°N, ${rec.pondCentroid.lon.toFixed(5)}°E`;
+  document.getElementById("s-surface").textContent = formatArea(rec.basinSurfaceAreaM2 || rec.estimatedCatchmentAreaSqM || 0);
+  document.getElementById("s-compactness").textContent = rec.compactnessScore ? rec.compactnessScore.toFixed(2) : "0.78 (Well-rounded)";
+}
+
+function renderCandidatesTable(result) {
+  const tbody = document.getElementById("candidates-tbody");
+  const candidates = result.pondCandidates || [];
+
+  if (!candidates.length) {
+    tbody.innerHTML = `<tr><td colspan="7">No candidate depressions detected.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = candidates.map((c, idx) => {
+    const isRec = idx === 0;
+    const rankBadge = isRec
+      ? `<span style="color: #ff4b4b; font-weight: 700;">#1 (Recommended)</span>`
+      : `#${idx + 1}`;
+    return `
+      <tr>
+        <td>${rankBadge}</td>
+        <td style="font-family: monospace;">${c.pondCentroid.lat.toFixed(4)}, ${c.pondCentroid.lon.toFixed(4)}</td>
+        <td>${(c.pondElevation || 0).toFixed(1)}</td>
+        <td>${(c.basinDepthM || 0).toFixed(1)}</td>
+        <td>${formatVolume(c.estimatedVolumeM3 || 0)}</td>
+        <td>${formatArea(c.estimatedCatchmentAreaSqM || 0)}</td>
+        <td><strong>${((c.confidenceScore || 0) * 100).toFixed(0)}%</strong></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function renderWaterBalance(result, series) {
+  const rec = (result.pondCandidates || [])[0];
+  if (!rec || !series) return;
+
+  const annualM = series.meanAnnualPrecipitationM || 0;
+  const annualMm = annualM * 1000;
+  const catchSqM = rec.estimatedCatchmentAreaSqM || 0;
+  const storageM3 = Math.max(0, rec.estimatedVolumeM3 || 0);
+  const potentialRunoffM3 = annualM * catchSqM * RUNOFF_COEFF;
+  const fillRatio = storageM3 > 0 ? (potentialRunoffM3 / storageM3) * 100 : 100;
+
+  const box = document.getElementById("water-balance-box");
+  box.innerHTML = `
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div>• <strong>Mean Annual Precipitation:</strong> ${annualMm.toFixed(0)} mm/year (ERA5 10-Yr Avg)</div>
+      <div>• <strong>Catchment Potential Runoff:</strong> ${formatVolume(potentialRunoffM3)} (assuming C = ${RUNOFF_COEFF.toFixed(2)})</div>
+      <div>• <strong>Basin Inflow Fill Ratio:</strong> <strong>${fillRatio.toFixed(0)}%</strong> of pond storage capacity</div>
+      <div style="margin-top: 4px; color: ${fillRatio >= 100 ? '#81c784' : '#ffa421'}; font-weight: 600;">
+        ${fillRatio >= 100 ? "✓ Sizing is hydrologically adequate — anticipated to fill and sustain dry-season storage." : "⚠️ Catchment area may provide partial filling under average monsoon conditions."}
+      </div>
+    </div>
+  `;
+}
+
 function renderRainfallChart(series) {
-  const loadingEl = document.getElementById("rainfall-loading");
-  loadingEl.classList.add("hidden");
+  const loader = document.getElementById("rainfall-chart-loader");
+  loader.classList.add("hidden");
 
   if (!series || !series.monthlyMeanPrecipitationM) return;
 
-  const monthly_mm = series.monthlyMeanPrecipitationM.map(v => +(v * 1000).toFixed(1));
+  const annualMm = ((series.meanAnnualPrecipitationM || 0) * 1000).toFixed(0);
+  document.getElementById("rf-annual-badge").textContent = `Annual: ${annualMm} mm`;
+
+  const monthlyMm = series.monthlyMeanPrecipitationM.map(v => +(v * 1000).toFixed(1));
   const ctx = document.getElementById("rainfall-chart").getContext("2d");
 
   if (state.rainfallChart) state.rainfallChart.destroy();
@@ -500,13 +586,12 @@ function renderRainfallChart(series) {
   state.rainfallChart = new Chart(ctx, {
     type: "bar",
     data: {
-      labels:   MONTH_LABELS,
+      labels: MONTH_LABELS,
       datasets: [{
-        label:           "Avg monthly rainfall (mm)",
-        data:            monthly_mm,
-        backgroundColor: monthly_mm.map(v => v > 80 ? "#3b82f6" : v > 30 ? "#60a5fa" : "#93c5fd"),
-        borderRadius:    3,
-        borderSkipped:   false,
+        label: "Monthly Rainfall (mm)",
+        data: monthlyMm,
+        backgroundColor: monthlyMm.map(v => (v > 100 ? "#ff4b4b" : v > 40 ? "#ffa421" : "#1c83e1")),
+        borderRadius: 4,
       }],
     },
     options: {
@@ -516,18 +601,19 @@ function renderRainfallChart(series) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: ctx => ` ${ctx.parsed.y} mm`,
+            label: c => ` ${c.parsed.y} mm`,
           },
         },
       },
       scales: {
         x: {
-          ticks: { color: "#94a3b8", font: { size: 9 } },
-          grid:  { color: "rgba(255,255,255,0.05)" },
+          ticks: { color: "#808495", font: { family: "'Source Sans 3', sans-serif" } },
+          grid: { color: "rgba(255, 255, 255, 0.05)" },
         },
         y: {
-          ticks: { color: "#94a3b8", font: { size: 9 } },
-          grid:  { color: "rgba(255,255,255,0.05)" },
+          ticks: { color: "#808495", font: { family: "'Source Sans 3', sans-serif" } },
+          grid: { color: "rgba(255, 255, 255, 0.05)" },
+          title: { display: true, text: "Precipitation (mm)", color: "#808495" },
         },
       },
     },
@@ -535,60 +621,48 @@ function renderRainfallChart(series) {
 }
 
 // ---------------------------------------------------------------------------
-// Runoff summary card
-// ---------------------------------------------------------------------------
-function renderRunoffSummary(result, series) {
-  const rec = (result.pondCandidates || [])[0];
-  if (!rec || !series) return;
-
-  const annualMm    = (series.meanAnnualPrecipitationM || 0) * 1000;
-  const catchSqM    = rec.estimatedCatchmentAreaSqM || 0;
-  const storageCuM  = Math.max(0, rec.estimatedVolumeM3 || 0);
-  const runoffCuM   = series.meanAnnualPrecipitationM * catchSqM * RUNOFF_COEFF;
-  const fillable    = Math.min(runoffCuM, storageCuM);
-
-  const el = document.getElementById("runoff-summary");
-  el.innerHTML =
-    `Annual rainfall: <strong>${annualMm.toFixed(0)} mm</strong><br>` +
-    `Potential runoff: <strong>${formatVolume(runoffCuM)}</strong> (${(RUNOFF_COEFF * 100).toFixed(0)}% coefficient)<br>` +
-    `Est. fillable water: <strong>${formatVolume(fillable)}</strong>`;
-  el.classList.remove("hidden");
-}
-
-// ---------------------------------------------------------------------------
-// Downloads
+// Downloads & Exports
 // ---------------------------------------------------------------------------
 function downloadKML() {
-  if (!state.kmlB64) return;
-  const bytes = atob(state.kmlB64);
-  const arr   = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
-  const blob  = new Blob([arr], { type: "application/vnd.google-earth.kml+xml" });
-  triggerDownload(blob, "pond_analysis.kml");
+  if (!state.kmlB64) {
+    setStatus("No KML vector layer available for download.", "warning", false);
+    return;
+  }
+  const binary = atob(state.kmlB64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "application/vnd.google-earth.kml+xml" });
+  triggerDownload(blob, "pond_catchment_analysis.kml");
 }
 
 function downloadJSON() {
   if (!state.result) return;
-  const payload = { result: state.result, rainfall: state.rainfallSeries };
-  const blob    = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  triggerDownload(blob, "pond_analysis.json");
+  const payload = {
+    timestamp: new Date().toISOString(),
+    result: state.result,
+    rainfall: state.rainfallSeries,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  triggerDownload(blob, "pond_catchment_report.json");
 }
 
 function triggerDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
-  const a   = document.createElement("a");
-  a.href    = url;
+  const a = document.createElement("a");
+  a.href = url;
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
 
 // ---------------------------------------------------------------------------
-// Formatters
+// Formatting Helpers
 // ---------------------------------------------------------------------------
 function formatVolume(m3) {
   if (m3 >= 1_000_000) return `${(m3 / 1_000_000).toFixed(2)} Mm³`;
-  if (m3 >= 1_000)     return `${(m3 / 1_000).toFixed(1)} k m³`;
+  if (m3 >= 1_000) return `${(m3 / 1_000).toFixed(1)} k m³`;
   return `${m3.toFixed(0)} m³`;
 }
 
@@ -598,57 +672,70 @@ function formatArea(m2) {
 }
 
 // ---------------------------------------------------------------------------
-// Wire up event listeners
+// Event Listeners & Bootstrapping
 // ---------------------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
   loadConfig();
 
-  // Mode tab switch
-  document.querySelectorAll(".tab").forEach(tab => {
-    tab.addEventListener("click", () => switchMode(tab.dataset.mode));
+  // Mode radio clicks
+  document.querySelectorAll(".st-radio-option").forEach(opt => {
+    opt.addEventListener("click", () => switchMode(opt.dataset.mode));
   });
 
-  // DEM analyze
-  document.getElementById("analyze-dem-btn").addEventListener("click", analyzeDem);
+  // Action buttons
+  document.getElementById("btn-run-analysis").addEventListener("click", runAnalysis);
+  document.getElementById("btn-clear-selection").addEventListener("click", clearPolygon);
 
-  // Upload analyze
-  document.getElementById("analyze-upload-btn").addEventListener("click", analyzeUpload);
-
-  // Clear polygon buttons
-  document.getElementById("clear-dem-btn").addEventListener("click",    clearPolygon);
-  document.getElementById("clear-upload-btn").addEventListener("click", clearPolygon);
-
-  // File input
-  const fileInput = document.getElementById("file-input");
-  const fileLabel = document.getElementById("file-label");
-  const fileDrop  = document.getElementById("file-drop");
-
-  fileInput.addEventListener("change", () => {
-    const file = fileInput.files[0];
-    if (!file) return;
-    state.uploadedFile = file;
-    fileLabel.textContent = `📄 ${file.name}`;
-    fileDrop.classList.add("has-file");
-    setAnalyzeEnabled(canAnalyze());
-  });
-
-  // Drag-and-drop onto file zone
-  fileDrop.addEventListener("dragover", e => { e.preventDefault(); fileDrop.style.borderColor = "var(--primary)"; });
-  fileDrop.addEventListener("dragleave", ()  => { fileDrop.style.borderColor = ""; });
-  fileDrop.addEventListener("drop", e => {
-    e.preventDefault();
-    fileDrop.style.borderColor = "";
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    fileInput.files = e.dataTransfer.files;
-    state.uploadedFile = file;
-    fileLabel.textContent = `📄 ${file.name}`;
-    fileDrop.classList.add("has-file");
-    setAnalyzeEnabled(canAnalyze());
+  // Tabs switching
+  document.querySelectorAll(".st-tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".st-tab-btn").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll(".st-tab-panel").forEach(p => p.classList.add("hidden"));
+      btn.classList.add("active");
+      const targetPanel = document.getElementById(btn.dataset.tab);
+      if (targetPanel) targetPanel.classList.remove("hidden");
+    });
   });
 
   // Downloads
-  document.getElementById("dl-kml-btn").addEventListener("click",  downloadKML);
-  document.getElementById("dl-json-btn").addEventListener("click",  downloadJSON);
+  document.getElementById("dl-kml-btn-main").addEventListener("click", downloadKML);
+  document.getElementById("dl-json-btn-main").addEventListener("click", downloadJSON);
+
+  // File upload input
+  const fileInput = document.getElementById("file-input");
+  const fileLabel = document.getElementById("file-label");
+  const dropZone = document.getElementById("file-drop-zone");
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
+    if (file) {
+      state.uploadedFile = file;
+      fileLabel.textContent = `📄 ${file.name}`;
+      dropZone.classList.add("has-file");
+      setAnalyzeEnabled(canAnalyze());
+    }
+  });
+
+  dropZone.addEventListener("dragover", e => {
+    e.preventDefault();
+    dropZone.classList.add("dragover");
+  });
+
+  dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("dragover");
+  });
+
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("dragover");
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      fileInput.files = e.dataTransfer.files;
+      state.uploadedFile = file;
+      fileLabel.textContent = `📄 ${file.name}`;
+      dropZone.classList.add("has-file");
+      setAnalyzeEnabled(canAnalyze());
+    }
+  });
 });

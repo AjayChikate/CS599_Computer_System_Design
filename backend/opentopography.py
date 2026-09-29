@@ -36,9 +36,9 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 MAX_AREA_KM2: float = float(os.getenv("MAX_AREA_KM2", "25.0"))
 
 # If set, large requests are split into tiles of this size (km²) and mosaicked.
-# On restricted campus networks, set  OPENTOPO_TILE_KM2=0.4  in your .env.
-# Leave unset (or 0) to download the entire bbox in one request (default).
-_TILE_KM2: float = float(os.getenv("OPENTOPO_TILE_KM2", "0"))
+# Defaults to 0.35 km² to prevent campus network middleboxes from terminating streams.
+# Set OPENTOPO_TILE_KM2=0 in .env to disable tiling and download in one single request.
+_TILE_KM2: float = float(os.getenv("OPENTOPO_TILE_KM2", "0.35"))
 
 MAX_DEM_BYTES = 32 * 1024 * 1024
 MAX_GRID_CELLS = 2_000_000
@@ -122,7 +122,7 @@ def _fetch_single_tile(
         t0 = perf_counter()
         try:
             with requests.get(
-                OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(10, 120)
+                OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(30, 180)
             ) as response:
                 elapsed = perf_counter() - t0
                 logger.info(

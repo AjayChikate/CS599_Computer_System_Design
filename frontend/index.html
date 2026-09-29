@@ -3,119 +3,292 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pond Catchment Analysis</title>
+  <title>Village Pond Planning System | CSD Assignment 1</title>
 
-  <!-- Leaflet map -->
+  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <!-- Leaflet.draw (polygon drawing toolbar) -->
+  <!-- Leaflet.draw CSS -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <!-- Inter Google Font (Streamlit Default) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Source+Code+Pro:wght@400;600&display=swap" rel="stylesheet">
 
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div id="app">
+  <div id="st-app" class="st-container">
 
-    <!-- ── SIDEBAR ── -->
-    <aside id="sidebar">
-      <header class="sidebar-header">
-        <div class="logo">🏞️</div>
-        <div>
-          <h1>Pond Catchment</h1>
-          <p class="subtitle">Village pond site screening</p>
-        </div>
-      </header>
-
-      <!-- Mode tabs -->
-      <div class="mode-tabs" role="tablist">
-        <button class="tab active" data-mode="dem" role="tab">📡 Satellite DEM</button>
-        <button class="tab" data-mode="upload" role="tab">📂 Upload Survey</button>
-      </div>
-
-      <!-- ── DEM mode panel ── -->
-      <div id="dem-panel" class="panel">
-        <div class="field-group">
-          <label for="dataset-select">Elevation Dataset</label>
-          <select id="dataset-select">
-            <option value="COP30">COP30 — Copernicus 30 m (recommended)</option>
-            <option value="AW3D30">AW3D30 — ALOS World 3D 30 m</option>
-            <option value="SRTMGL1">SRTMGL1 — SRTM 30 m</option>
-          </select>
-        </div>
-
-        <div class="area-hint">
-          <span class="icon">✏️</span>
-          <span>Draw a polygon on the map around the catchment area (up to <strong id="max-area-hint">25 km²</strong>).</span>
-        </div>
-
-        <div id="dem-area-display" class="area-display hidden">
-          Area: <span id="dem-area-value">—</span>
-        </div>
-
-        <button id="analyze-dem-btn" class="btn btn-primary" disabled>
-          ⚡ Fetch DEM &amp; Analyze
-        </button>
-        <button id="clear-dem-btn" class="btn btn-ghost hidden">✕ Clear polygon</button>
-      </div>
-
-      <!-- ── Upload mode panel ── -->
-      <div id="upload-panel" class="panel hidden">
-        <div class="field-group">
-          <label for="file-input">Contour survey (.kml or .kmz)</label>
-          <div class="file-drop" id="file-drop">
-            <input type="file" id="file-input" accept=".kml,.kmz" />
-            <span id="file-label">Drop file here or <u>browse</u></span>
+    <!-- ── STREAMLIT SIDEBAR ── -->
+    <aside id="st-sidebar" class="st-sidebar">
+      <div class="sidebar-content">
+        <div class="sidebar-header">
+          <div class="logo-badge">💧</div>
+          <div>
+            <h2 class="sidebar-title">Pond Catchment</h2>
+            <div class="sidebar-subtitle">Village Siting Decision System</div>
           </div>
         </div>
 
-        <div class="area-hint">
-          <span class="icon">✏️</span>
-          <span>Also draw a polygon to restrict the analysis to a specific sub-area.</span>
+        <hr class="st-divider" />
+
+        <!-- Mode Radio (Streamlit st.radio style) -->
+        <div class="st-widget">
+          <label class="st-label">Analysis Source</label>
+          <div class="st-radio-group" role="radiogroup">
+            <label class="st-radio-option active" data-mode="dem">
+              <input type="radio" name="source_mode" value="dem" checked />
+              <span class="st-radio-circle"></span>
+              <span class="st-radio-text">📡 Satellite Global DEM</span>
+            </label>
+            <label class="st-radio-option" data-mode="upload">
+              <input type="radio" name="source_mode" value="upload" />
+              <span class="st-radio-circle"></span>
+              <span class="st-radio-text">📂 Upload Contour Survey</span>
+            </label>
+          </div>
         </div>
 
-        <div id="upload-area-display" class="area-display hidden">
-          Area: <span id="upload-area-value">—</span>
+        <!-- DEM Options -->
+        <div id="panel-dem-options" class="st-widget-panel">
+          <div class="st-widget">
+            <label for="dataset-select" class="st-label">Elevation Dataset</label>
+            <select id="dataset-select" class="st-select">
+              <option value="COP30">COP30 — Copernicus 30m (Recommended)</option>
+              <option value="AW3D30">AW3D30 — ALOS World 3D 30m</option>
+              <option value="SRTMGL1">SRTMGL1 — NASA SRTM 30m</option>
+            </select>
+          </div>
+
+          <div class="st-alert st-alert-info">
+            <span class="alert-icon">ℹ️</span>
+            <div>Use the polygon tool ⬡ on the map to outline the village area (up to <strong id="max-area-hint">25 km²</strong>).</div>
+          </div>
         </div>
 
-        <button id="analyze-upload-btn" class="btn btn-primary" disabled>
-          ⚡ Analyze Survey
-        </button>
-        <button id="clear-upload-btn" class="btn btn-ghost hidden">✕ Clear polygon</button>
-      </div>
+        <!-- Upload Options -->
+        <div id="panel-upload-options" class="st-widget-panel hidden">
+          <div class="st-widget">
+            <label class="st-label">Upload KML / KMZ Survey File</label>
+            <div class="st-file-uploader" id="file-drop-zone">
+              <input type="file" id="file-input" accept=".kml,.kmz" />
+              <div class="uploader-content">
+                <span class="upload-icon">📁</span>
+                <span id="file-label" class="upload-text">Browse files or drag & drop here</span>
+                <span class="upload-hint">Limit 25MB • .kml, .kmz</span>
+              </div>
+            </div>
+          </div>
 
-      <!-- Status bar -->
-      <div id="status-bar" class="status-bar hidden">
-        <div class="spinner" id="status-spinner"></div>
-        <span id="status-text"></span>
-      </div>
-
-      <!-- Results panel (hidden until analysis complete) -->
-      <div id="results-panel" class="hidden">
-        <div class="section-title">📍 Recommended Site</div>
-
-        <div id="metrics-grid" class="metrics-grid"></div>
-
-        <div class="section-title" style="margin-top:16px">🌧️ ERA5 Rainfall (10-year avg)</div>
-        <div class="chart-container">
-          <canvas id="rainfall-chart"></canvas>
-          <div id="rainfall-loading" class="chart-loading">Fetching rainfall data…</div>
+          <div class="st-alert st-alert-info">
+            <span class="alert-icon">ℹ️</span>
+            <div>Optional: Draw a polygon on the map to filter analysis to a specific sub-boundary.</div>
+          </div>
         </div>
 
-        <div id="runoff-summary" class="runoff-summary hidden"></div>
+        <!-- Selection Area Feedback Badge -->
+        <div id="selection-area-card" class="st-selection-card hidden">
+          <div class="selection-card-header">
+            <span class="selection-title">Selected Region</span>
+            <span id="selection-area-val" class="selection-badge">0.00 km²</span>
+          </div>
+          <div id="selection-coords-text" class="selection-coords">Bounds: —</div>
+        </div>
 
-        <div class="download-row" id="download-row">
-          <button class="btn btn-outline" id="dl-kml-btn">⬇ KML</button>
-          <button class="btn btn-outline" id="dl-json-btn">⬇ JSON</button>
+        <!-- Action Buttons -->
+        <div class="st-button-group">
+          <button id="btn-run-analysis" class="st-button st-btn-primary" disabled>
+            ⚡ Run Catchment Analysis
+          </button>
+          <button id="btn-clear-selection" class="st-button st-btn-secondary hidden">
+            ✕ Clear Polygon
+          </button>
+        </div>
+
+        <!-- Status & Logs Banner -->
+        <div id="st-status-box" class="st-status-container hidden">
+          <div class="st-status-header">
+            <div class="st-spinner" id="st-status-spinner"></div>
+            <span id="st-status-text" class="st-status-label">Processing...</span>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <div>CSD Assignment 1 • Terrain Siting</div>
+          <div class="system-version">FastAPI + D8 Hydrology + ERA5</div>
         </div>
       </div>
     </aside>
 
-    <!-- ── MAP ── -->
-    <main id="map"></main>
+    <!-- ── STREAMLIT MAIN CANVAS ── -->
+    <main id="st-main" class="st-main">
+      <div class="main-content">
+        
+        <!-- Streamlit Page Header -->
+        <header class="st-page-header">
+          <h1 class="st-main-title">💧 AI-based Village Pond Planning System</h1>
+          <p class="st-main-caption">
+            Automated geospatial terrain screening, depression storage calculation, D8 watershed delineation, and ERA5 historical precipitation runoff modeling for rural water conservation.
+          </p>
+        </header>
+
+        <!-- Notification Banner -->
+        <div id="main-banner" class="st-alert st-alert-neutral">
+          <span class="alert-icon">💡</span>
+          <span>Draw a region of interest on the interactive map or select a contour survey in the sidebar to begin.</span>
+        </div>
+
+        <!-- GIS Map Card -->
+        <div class="st-card map-card">
+          <div class="card-header">
+            <span class="card-title">🗺️ Geospatial Terrain & Catchment Viewer</span>
+            <div class="map-legend">
+              <span class="legend-item"><span class="legend-box rec-box"></span> Pond Bed</span>
+              <span class="legend-item"><span class="legend-box basin-box"></span> Basin Rim</span>
+              <span class="legend-item"><span class="legend-box cat-box"></span> Catchment</span>
+            </div>
+          </div>
+          <div id="map" class="map-viewport"></div>
+        </div>
+
+        <!-- Results Section (Visible after analysis) -->
+        <div id="results-wrapper" class="results-container hidden">
+
+          <!-- Streamlit Metric Row (st.columns / st.metric) -->
+          <div class="st-metrics-row">
+            <div class="st-metric-card">
+              <div class="metric-label">🏔️ Pond Bed Elevation</div>
+              <div class="metric-value" id="m-elevation">—</div>
+              <div class="metric-delta">Mean terrain level</div>
+            </div>
+            <div class="st-metric-card">
+              <div class="metric-label">📏 Max Basin Depth</div>
+              <div class="metric-value" id="m-depth">—</div>
+              <div class="metric-delta">Depression rim offset</div>
+            </div>
+            <div class="st-metric-card">
+              <div class="metric-label">💧 Storage Capacity</div>
+              <div class="metric-value" id="m-storage">—</div>
+              <div class="metric-delta">Frustum integration</div>
+            </div>
+            <div class="st-metric-card">
+              <div class="metric-label">🌐 Catchment Area</div>
+              <div class="metric-value" id="m-catchment">—</div>
+              <div class="metric-delta">D8 upstream flow</div>
+            </div>
+            <div class="st-metric-card">
+              <div class="metric-label">🎯 Siting Confidence</div>
+              <div class="metric-value" id="m-confidence">—</div>
+              <div class="metric-delta">Multi-criteria score</div>
+            </div>
+          </div>
+
+          <!-- Streamlit Tabs (st.tabs) -->
+          <div class="st-tabs-container">
+            <div class="st-tab-bar" role="tablist">
+              <button class="st-tab-btn active" data-tab="tab-summary">📊 Basin & Siting Assessment</button>
+              <button class="st-tab-btn" data-tab="tab-rainfall">🌧️ Rainfall & Runoff Analysis</button>
+              <button class="st-tab-btn" data-tab="tab-candidates">📋 Candidate Alternatives</button>
+              <button class="st-tab-btn" data-tab="tab-export">💾 Export & Report</button>
+            </div>
+
+            <!-- Tab 1: Summary -->
+            <div id="tab-summary" class="st-tab-panel active">
+              <div class="st-grid-two">
+                <div class="st-card">
+                  <h3 class="card-subtitle">🌟 Primary Siting Recommendation</h3>
+                  <table class="st-table-summary">
+                    <tbody>
+                      <tr><td>Location (Lat, Lon)</td><td id="s-coords" class="val-bold">—</td></tr>
+                      <tr><td>Depression Type</td><td id="s-type" class="val-bold">Natural Topographic Depression</td></tr>
+                      <tr><td>Flow Routing Model</td><td id="s-routing" class="val-bold">D8 Deterministic Eight-Node</td></tr>
+                      <tr><td>Basin Surface Area</td><td id="s-surface" class="val-bold">—</td></tr>
+                      <tr><td>Compactness / Roundness</td><td id="s-compactness" class="val-bold">—</td></tr>
+                      <tr><td>River Avoidance Check</td><td id="s-river" class="val-bold">Passed (Non-riverine depression)</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="st-card">
+                  <h3 class="card-subtitle">💧 Water Balance & Potential</h3>
+                  <div id="water-balance-box" class="water-balance-content">
+                    <p id="wb-summary-text">Simulating ERA5 10-year runoff against depression storage capacity...</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab 2: Rainfall -->
+            <div id="tab-rainfall" class="st-tab-panel hidden">
+              <div class="st-card">
+                <div class="chart-header">
+                  <div>
+                    <h3 class="card-subtitle">🌧️ 10-Year Historical Precipitation (ERA5 Reanalysis)</h3>
+                    <p class="card-caption">Monthly average rainfall aggregated over historical records with estimated runoff (C = 0.20).</p>
+                  </div>
+                  <div id="rf-annual-badge" class="badge-annual">Annual: — mm</div>
+                </div>
+                <div class="chart-box">
+                  <canvas id="rainfall-chart"></canvas>
+                  <div id="rainfall-chart-loader" class="chart-loader">Fetching ERA5 precipitation series...</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab 3: Candidates -->
+            <div id="tab-candidates" class="st-tab-panel hidden">
+              <div class="st-card">
+                <h3 class="card-subtitle">📋 Top Ranked Basin Locations in Selected Region</h3>
+                <div class="table-scroll">
+                  <table class="st-data-table" id="candidates-table">
+                    <thead>
+                      <tr>
+                        <th>Rank</th>
+                        <th>Coordinates</th>
+                        <th>Elevation (m)</th>
+                        <th>Depth (m)</th>
+                        <th>Storage (m³)</th>
+                        <th>Catchment (m²)</th>
+                        <th>Score</th>
+                      </tr>
+                    </thead>
+                    <tbody id="candidates-tbody">
+                      <tr><td colspan="7">No candidate data available.</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Tab 4: Export -->
+            <div id="tab-export" class="st-tab-panel hidden">
+              <div class="st-card">
+                <h3 class="card-subtitle">💾 Export Geospatial Layers & Analysis Records</h3>
+                <p class="card-caption">Download KML layers for Google Earth GIS integration or JSON structured outputs for technical reporting.</p>
+                <div class="export-actions">
+                  <button id="dl-kml-btn-main" class="st-button st-btn-secondary">
+                    📥 Download Contours & Catchment (KML)
+                  </button>
+                  <button id="dl-json-btn-main" class="st-button st-btn-secondary">
+                    📥 Download Full Analysis Payload (JSON)
+                  </button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </main>
+
   </div>
 
+  <!-- External Libraries -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Application JS -->
   <script src="/static/app.js"></script>
 </body>
 </html>

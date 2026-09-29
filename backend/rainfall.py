@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import defaultdict
 from datetime import date
 from typing import Any
@@ -53,23 +54,45 @@ def fetch_historical_rainfall_for_points(
         end_year,
         len(locations),
     )
-    try:
-        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(5, 45))
-        if response.status_code != 200:
-            logger.warning("Rainfall provider returned HTTP %d", response.status_code)
-            raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
-        payload = response.json()
-    except requests.Timeout as exc:
-        logger.warning("Rainfall request timed out")
-        raise ValueError("The rainfall service took too long to respond. Try again shortly.") from exc
-    except requests.RequestException as exc:
-        logger.error("Rainfall network request failed: %s", type(exc).__name__)
-        raise ValueError("Could not connect to the rainfall service. Check the network and try again.") from exc
-    except ValueError:
-        raise
-    except Exception as exc:
-        logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
-        raise ValueError("The rainfall service returned an unreadable response.") from exc
+    max_attempts = 3
+    retry_delay_s = 2.0
+    payload = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(30, 90))
+            if response.status_code != 200:
+                logger.warning("Rainfall provider returned HTTP %d", response.status_code)
+                if response.status_code == 429:
+                    raise ValueError("Rainfall API rate limit reached. Please try again in a few moments.")
+                raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
+            payload = response.json()
+            break
+        except requests.Timeout:
+            if attempt < max_attempts:
+                logger.warning(
+                    "Rainfall request timed out (attempt %d/%d) — retrying in %.0f s",
+                    attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.warning("Rainfall request timed out (all %d attempts exhausted)", max_attempts)
+                raise ValueError("The rainfall service took too long to respond. Try again shortly.") from None
+        except requests.RequestException as exc:
+            if attempt < max_attempts:
+                logger.warning(
+                    "Rainfall network request failed: %s (attempt %d/%d) — retrying in %.0f s",
+                    type(exc).__name__, attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.error("Rainfall network request failed: %s", type(exc).__name__)
+                raise ValueError("Could not connect to the rainfall service. Check the network and try again.") from exc
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
+            raise ValueError("The rainfall service returned an unreadable response.") from exc
 
     payloads = payload if isinstance(payload, list) else [payload]
     if len(payloads) != len(locations):
