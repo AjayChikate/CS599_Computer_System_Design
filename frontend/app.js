@@ -58,11 +58,31 @@ function initMap() {
     zoomControl: true,
   });
 
-  // Base map tiles (CartoDB Dark Matter / OSM)
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
-    attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a>, © CartoDB",
+  // Free Base Map Tile Layers (No API Key Required)
+  const osmStandard = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
     maxZoom: 19,
-  }).addTo(map);
+  });
+
+  const esriSatellite = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    attribution: "Tiles © Esri — Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+    maxZoom: 19,
+  });
+
+  const openTopo = L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", {
+    attribution: "Map data: © <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors, SRTM | Map style: © <a href='https://opentopomap.org'>OpenTopoMap</a>",
+    maxZoom: 17,
+  });
+
+  // Default to OpenStreetMap Standard
+  osmStandard.addTo(map);
+
+  // Basemap switch control (Top-left)
+  L.control.layers({
+    "🗺️ OpenStreetMap": osmStandard,
+    "🛰️ Satellite Imagery (Esri)": esriSatellite,
+    "🏔️ Topographic Map": openTopo,
+  }, null, { position: "topleft" }).addTo(map);
 
   drawnItems = new L.FeatureGroup();
   map.addLayer(drawnItems);
@@ -92,6 +112,10 @@ function initMap() {
   map.on(L.Draw.Event.CREATED, onPolygonCreated);
   map.on(L.Draw.Event.EDITED, onPolygonEdited);
   map.on(L.Draw.Event.DELETED, onPolygonDeleted);
+
+  setTimeout(() => {
+    map.invalidateSize();
+  }, 200);
 }
 
 // ---------------------------------------------------------------------------
