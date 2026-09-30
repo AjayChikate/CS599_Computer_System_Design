@@ -1,6 +1,6 @@
 # Phase 3: Pond Catchment and Rainfall Analysis
 
-A Streamlit map and FastAPI service for finding pond-site candidates from contour surveys or global elevation data, delineating DEM catchments, and estimating rainfall-driven runoff and pond storage.
+FastAPI service for finding pond-site candidates from contour surveys or global elevation data, delineating DEM catchments, and estimating rainfall-driven runoff and pond storage.
 
 ## End-to-end algorithm
 
@@ -28,20 +28,6 @@ API_Key=your-personal-key
 ```
 
 The server reads the key; it is not requested in the frontend. Keep `.env` out of version control. OpenTopography prohibits sharing one user's key with other users and applies daily quotas. Rainfall comes from the Open-Meteo Historical Weather API, which has separate usage terms and limits.
-
-Start the frontend:
-
-```powershell
-streamlit run frontend/streamlit_app.py
-```
-
-Streamlit defaults to port 8501. Select another port if needed:
-
-```powershell
-streamlit run frontend/streamlit_app.py --server.port 8502
-```
-
-Start the API separately when needed:
 
 ```powershell
 uvicorn backend.app:app --host 0.0.0.0 --port 8000
