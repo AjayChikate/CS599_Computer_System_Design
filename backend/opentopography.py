@@ -31,14 +31,17 @@ OPENTOPOGRAPHY_URL = "https://portal.opentopography.org/API/globaldem"
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 # Maximum area the user may select (km²). Read from env so the same codebase
-# works both locally (default 25 km²) and on restricted campus servers.
-# On the SSH server, add  MAX_AREA_KM2=0.5  to your .env file.
-MAX_AREA_KM2: float = float(os.getenv("MAX_AREA_KM2", "25.0"))
+# works both locally (default 0.5 km²) and on unrestricted networks.
+# Campus-network default: 0.5 km² — one tile request that completes in ~15 s.
+MAX_AREA_KM2: float = float(os.getenv("MAX_AREA_KM2", "0.5"))
 
-# If set, large requests are split into tiles of this size (km²) and mosaicked.
-# Defaults to 0.35 km² to prevent campus network middleboxes from terminating streams.
-# Set OPENTOPO_TILE_KM2=0 in .env to disable tiling and download in one single request.
-_TILE_KM2: float = float(os.getenv("OPENTOPO_TILE_KM2", "0.35"))
+# Tile size (km²) for splitting large areas. Default 0.25 km² → max 4 tiles for a 0.5 km² area.
+# Set OPENTOPO_TILE_KM2=0 in .env to disable tiling.
+_TILE_KM2: float = float(os.getenv("OPENTOPO_TILE_KM2", "0.25"))
+
+# Maximum concurrent tile downloads. Campus firewalls drop connections when too many
+# parallel TCP streams hit the same remote host. Keep at 2 to stay under radar.
+_MAX_CONCURRENT_TILES: int = int(os.getenv("OPENTOPO_MAX_CONCURRENT_TILES", "2"))
 
 MAX_DEM_BYTES = 32 * 1024 * 1024
 MAX_GRID_CELLS = 2_000_000
@@ -97,15 +100,19 @@ async def _fetch_single_tile(
     api_key: str,
     *,
     max_attempts: int = 3,
-    retry_delay_s: float = 3.0,
-) -> bytes:
+    retry_delay_s: float = 5.0,
+) -> bytes | None:
     """Download one DEM GeoTIFF tile from OpenTopography with retry on transient errors.
 
-    Retries on ConnectionError and Timeout only.  HTTP errors such as 401 /
-    429 / 204 are permanent — they raise immediately without retrying.
+    Returns ``None`` on transient failures (timeout / network error) so the
+    caller can mosaic whatever tiles succeeded rather than failing the whole request.
+
+    Raises ``ValueError`` immediately on permanent HTTP errors (401, 429, etc.)
+    so bad-API-key problems surface clearly without retrying.
 
     Uses async httpx so the FastAPI event loop is NOT blocked during the
-    10-16 s OpenTopography response time (campus-network safe).
+    10-30 s OpenTopography response time (campus-network safe).
+    Connect timeout = 60 s to handle the 29-30 s first-byte delay seen on this server.
     """
     center_lat = (north + south) / 2
     tile_area_km2 = (
@@ -121,11 +128,13 @@ async def _fetch_single_tile(
         "outputFormat": "GTiff",
         "API_Key":      api_key,
     }
+    # connect=60 s to handle 29-30 s first-byte delay from OpenTopography on this network.
+    _timeout = httpx.Timeout(connect=60.0, read=180.0, write=30.0, pool=10.0)
 
     for attempt in range(1, max_attempts + 1):
         t0 = perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=180.0)) as client:
+            async with httpx.AsyncClient(timeout=_timeout) as client:
                 response = await client.get(OPENTOPOGRAPHY_URL, params=params)
 
             elapsed = perf_counter() - t0
@@ -133,7 +142,7 @@ async def _fetch_single_tile(
                 "DEM provider responded: status=%d response_time=%.2f s bbox_area=%.3f km^2",
                 response.status_code, elapsed, tile_area_km2,
             )
-            # --- Permanent HTTP failures (no retry) ---
+            # --- Permanent HTTP failures → raise immediately (no retry, no fallback) ---
             if response.status_code == 401:
                 logger.error("DEM request rejected: provider returned HTTP 401")
                 raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
@@ -169,13 +178,10 @@ async def _fetch_single_tile(
                 await asyncio.sleep(retry_delay_s)
             else:
                 logger.warning(
-                    "DEM tile timed out after %.2f s (all %d attempts exhausted)",
+                    "DEM tile timed out after %.2f s (all %d attempts exhausted) — skipping tile",
                     elapsed, max_attempts,
                 )
-                raise ValueError(
-                    "OpenTopography took too long to respond. "
-                    "Try a smaller area or retry later."
-                ) from None
+                return None  # allow partial mosaic
 
         except httpx.RequestError as exc:
             elapsed = perf_counter() - t0
@@ -186,16 +192,13 @@ async def _fetch_single_tile(
                 )
                 await asyncio.sleep(retry_delay_s)
             else:
-                logger.error(
-                    "DEM tile network error: %s (all %d attempts exhausted)",
+                logger.warning(
+                    "DEM tile network error: %s (all %d attempts exhausted) — skipping tile",
                     type(exc).__name__, max_attempts,
                 )
-                raise ValueError(
-                    "Could not connect to OpenTopography after 3 attempts. "
-                    "Check the network and try again."
-                ) from exc
+                return None  # allow partial mosaic
 
-    raise RuntimeError("Unreachable")  # pragma: no cover
+    return None  # pragma: no cover
 
 
 def _split_bbox(
@@ -268,15 +271,17 @@ def _mosaic_dem_tiles(tile_bytes_list: list[bytes]) -> bytes:
 async def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30") -> bytes:
     """Download a DEM for *area_polygon* from OpenTopography.
 
-    If ``OPENTOPO_TILE_KM2`` is set in the environment, large requests are
-    automatically split into smaller tiles (each ≤ that many km²) and merged
-    using rasterio after download.  This lets restricted-network servers
-    (where long-lived TCP connections are cut by a campus firewall) download
-    large areas by making many small short-lived requests instead.
+    Large requests are split into ≤ _TILE_KM2 km² tiles fetched in parallel
+    (capped at _MAX_CONCURRENT_TILES simultaneous requests to avoid triggering
+    campus-network connection rate limits).  Tiles that fail after all retries
+    are skipped — the mosaic proceeds with whatever tiles succeeded, provided
+    at least half of them arrived successfully.
 
     Set in ``.env`` on the SSH server::
 
-        OPENTOPO_TILE_KM2=0.4
+        MAX_AREA_KM2=0.5
+        OPENTOPO_TILE_KM2=0.25
+        OPENTOPO_MAX_CONCURRENT_TILES=2
     """
     west, south, east, north = validate_area_polygon(area_polygon)
 
@@ -311,25 +316,59 @@ async def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset:
     # ── Tiled download (for restricted-network servers) ──────────────────────
     if _TILE_KM2 > 0 and area_km2 > _TILE_KM2:
         tiles = _split_bbox(west, south, east, north, _TILE_KM2)
+        total_tiles = len(tiles)
         logger.info(
-            "DEM tiled download: area=%.2f km² split into %d tiles (max %.2f km² each)",
-            area_km2, len(tiles), _TILE_KM2,
+            "DEM tiled download: area=%.2f km² → %d tiles (≤%.2f km² each), concurrency=%d",
+            area_km2, total_tiles, _TILE_KM2, _MAX_CONCURRENT_TILES,
         )
-        for i, (tw, ts, te, tn) in enumerate(tiles, 1):
+
+        # Semaphore limits concurrent connections — campus firewalls drop bursts
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_TILES)
+
+        async def _fetch_with_sem(i: int, tw: float, ts: float, te: float, tn: float) -> bytes | None:
             t_area = (te - tw) * 111.32 * math.cos(math.radians((tn + ts) / 2)) * (tn - ts) * 110.574
             logger.info(
-                "DEM tile %d/%d: bbox=[%.5f, %.5f, %.5f, %.5f] area=%.3f km²",
-                i, len(tiles), tw, ts, te, tn, t_area,
+                "DEM tile %d/%d queued: bbox=[%.5f, %.5f, %.5f, %.5f] area=%.3f km²",
+                i, total_tiles, tw, ts, te, tn, t_area,
             )
-        # Fetch all tiles concurrently — each is a separate short-lived TCP request
-        tile_bytes_list: list[bytes] = list(await asyncio.gather(*[
-            _fetch_single_tile(tw, ts, te, tn, dataset, api_key)
-            for tw, ts, te, tn in tiles
-        ]))
-        return _mosaic_dem_tiles(tile_bytes_list)
+            async with sem:
+                logger.info("DEM tile %d/%d downloading ...", i, total_tiles)
+                return await _fetch_single_tile(tw, ts, te, tn, dataset, api_key)
+
+        results = await asyncio.gather(*[
+            _fetch_with_sem(i, tw, ts, te, tn)
+            for i, (tw, ts, te, tn) in enumerate(tiles, 1)
+        ])
+
+        good_tiles = [r for r in results if r is not None]
+        failed     = total_tiles - len(good_tiles)
+
+        if not good_tiles:
+            raise ValueError(
+                "All tile downloads failed (campus network may be blocking OpenTopography). "
+                "Try again or draw a smaller area."
+            )
+        if failed > 0:
+            logger.warning(
+                "DEM partial mosaic: %d/%d tiles succeeded, %d failed and will be skipped",
+                len(good_tiles), total_tiles, failed,
+            )
+        if failed > total_tiles // 2:
+            raise ValueError(
+                f"Too many tile downloads failed ({failed}/{total_tiles}). "
+                "The result would be too incomplete. Try a smaller area or retry."
+            )
+
+        return _mosaic_dem_tiles(good_tiles)
 
     # ── Direct single-request download ───────────────────────────────────────
-    return await _fetch_single_tile(west, south, east, north, dataset, api_key)
+    dem = await _fetch_single_tile(west, south, east, north, dataset, api_key)
+    if dem is None:
+        raise ValueError(
+            "OpenTopography did not respond after all retries. "
+            "Try again or draw a smaller area."
+        )
+    return dem
 
 
 def _inside_or_on_edge(point: Tuple[float, float], polygon: Sequence[Tuple[float, float]]) -> bool:

@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 // Configuration & Constants
 // ---------------------------------------------------------------------------
-let maxAreaKm2 = 25.0; // Dynamically synchronized with backend /api/config
+let maxAreaKm2 = 0.5; // Dynamically synchronized with backend /api/config
 const INDIA_CENTER = [21.25, 81.29];
 const INDIA_ZOOM = 6;
 const RUNOFF_COEFF = 0.20; // Runoff coefficient C = 0.20
@@ -217,7 +217,17 @@ function updateAreaFeedback(area, latlngs) {
   }
 
   const over = area > maxAreaKm2;
-  badge.textContent = `${area.toFixed(2)} km² ${over ? "⚠️ Too Large" : "✓ Ready"}`;
+  const tooSmall = area < 0.01;
+  let badge_label;
+  if (over) {
+    badge_label = `${area.toFixed(3)} km² ⚠️ Too Large (max ${maxAreaKm2} km²)`;
+  } else if (tooSmall) {
+    badge_label = `${area.toFixed(4)} km² ⚠️ Too Small (min 0.01 km²)`;
+  } else {
+    const quality = area <= 0.3 ? "✓ Ideal" : area <= maxAreaKm2 ? "⚡ OK" : "";
+    badge_label = `${area.toFixed(3)} km² ${quality}`;
+  }
+  badge.textContent = badge_label;
   badge.classList.toggle("over-limit", over);
 
   if (latlngs && latlngs.length > 0) {
