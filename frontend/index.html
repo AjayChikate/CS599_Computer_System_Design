@@ -34,13 +34,13 @@
 
         <!-- Village Search & Dropdown (Real-time Leaflet Map Reflection) -->
         <div class="st-widget village-search-widget">
-          <label for="village-search-input" class="st-label">📍 Search Village / Locality</label>
+          <label for="village-search-input" class="st-label"> Search Village / Locality</label>
           <div class="village-search-wrapper">
             <input
               type="text"
               id="village-search-input"
               class="st-input"
-              placeholder="Type village name (e.g. Patan, Kurud, Bhilai)..."
+              placeholder="Type village name..."
               autocomplete="off"
             />
             <span id="village-search-spinner" class="village-spinner hidden"></span>
@@ -57,12 +57,12 @@
             <label class="st-radio-option active" data-mode="dem">
               <input type="radio" name="source_mode" value="dem" checked />
               <span class="st-radio-circle"></span>
-              <span class="st-radio-text">📡 Satellite Global DEM</span>
+              <span class="st-radio-text"> Satellite Global DEM</span>
             </label>
             <label class="st-radio-option" data-mode="upload">
               <input type="radio" name="source_mode" value="upload" />
               <span class="st-radio-circle"></span>
-              <span class="st-radio-text">📂 Upload Contour Survey</span>
+              <span class="st-radio-text"> Upload Contour Survey</span>
             </label>
           </div>
         </div>
@@ -88,7 +88,6 @@
           </div>
 
           <div class="st-alert st-alert-info">
-            <span class="alert-icon">ℹ️</span>
             <div>Use the polygon tool ⬡ on the map to outline the target village catchment area (Max allowed: <strong id="max-area-hint">0.5 km²</strong>).</div>
           </div>
         </div>
@@ -108,7 +107,6 @@
           </div>
 
           <div class="st-alert st-alert-info">
-            <span class="alert-icon">ℹ️</span>
             <div>Optional: Draw a polygon on the map to filter analysis to a specific sub-boundary.</div>
           </div>
         </div>
@@ -125,7 +123,7 @@
         <!-- Action Buttons -->
         <div class="st-button-group">
           <button id="btn-run-analysis" class="st-button st-btn-primary" disabled>
-            ⚡ Run Catchment Analysis
+              Run Catchment Analysis
           </button>
           <button id="btn-clear-selection" class="st-button st-btn-secondary hidden">
             ✕ Clear Polygon
@@ -141,8 +139,7 @@
         </div>
 
         <div class="sidebar-footer">
-          <div>CSD Assignment 1 • Terrain Siting</div>
-          <div class="system-version">FastAPI + D8 Hydrology + ERA5</div>
+          <div>CSD Assignment 1</div>
         </div>
       </div>
     </aside>
