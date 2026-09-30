@@ -77,7 +77,7 @@ class DemAnalysisRequest(BaseModel):
 class RainfallRequest(BaseModel):
     """Request body for /api/fetchRainfall — fetch ERA5 monthly totals."""
     locations: List[List[float]]  # [[lat, lon], ...] one per pond candidate
-    years: int = 10               # Number of historical years to average
+    years: int = 5                # Number of historical years to average (default 5 years)
 
 
 # ---------------------------------------------------------------------------
@@ -131,65 +131,108 @@ def get_config() -> dict[str, Any]:
 
 # Curated instant fallback for prominent Indian/Chhattisgarh agricultural locations
 _FALLBACK_VILLAGES = [
-    {"name": "Patan", "displayName": "Patan, Durg District, Chhattisgarh, India", "lat": 21.0392, "lon": 81.5436, "type": "village"},
-    {"name": "Kurud", "displayName": "Kurud, Dhamtari District, Chhattisgarh, India", "lat": 20.8284, "lon": 81.7161, "type": "village"},
-    {"name": "Gunderdehi", "displayName": "Gunderdehi, Balod District, Chhattisgarh, India", "lat": 20.9383, "lon": 81.2891, "type": "village"},
-    {"name": "Abhanpur", "displayName": "Abhanpur, Raipur District, Chhattisgarh, India", "lat": 21.0531, "lon": 81.7482, "type": "village"},
-    {"name": "Arang", "displayName": "Arang, Raipur District, Chhattisgarh, India", "lat": 21.1942, "lon": 81.9682, "type": "town"},
-    {"name": "Dhamtari", "displayName": "Dhamtari, Chhattisgarh, India", "lat": 20.7071, "lon": 81.5492, "type": "city"},
-    {"name": "Bhilai", "displayName": "Bhilai, Durg District, Chhattisgarh, India", "lat": 21.2144, "lon": 81.4332, "type": "city"},
-    {"name": "Durg", "displayName": "Durg, Chhattisgarh, India", "lat": 21.1904, "lon": 81.2849, "type": "city"},
-    {"name": "Rajim", "displayName": "Rajim, Gariaband District, Chhattisgarh, India", "lat": 20.9634, "lon": 81.8841, "type": "town"},
-    {"name": "Simga", "displayName": "Simga, Baloda Bazar District, Chhattisgarh, India", "lat": 21.6322, "lon": 81.7013, "type": "town"},
-    {"name": "Bemetara", "displayName": "Bemetara, Chhattisgarh, India", "lat": 21.7052, "lon": 81.5484, "type": "town"},
-    {"name": "Tilda Newra", "displayName": "Tilda Newra, Raipur District, Chhattisgarh, India", "lat": 21.5642, "lon": 81.8732, "type": "town"},
-    {"name": "Balod", "displayName": "Balod, Chhattisgarh, India", "lat": 20.7301, "lon": 81.2052, "type": "town"},
-    {"name": "Raipur", "displayName": "Raipur, Chhattisgarh, India", "lat": 21.2514, "lon": 81.6296, "type": "city"},
-    {"name": "Nagri", "displayName": "Nagri, Sihawa, Dhamtari, Chhattisgarh, India", "lat": 20.3541, "lon": 81.8974, "type": "village"},
-    {"name": "Saja", "displayName": "Saja, Bemetara District, Chhattisgarh, India", "lat": 21.7331, "lon": 81.2842, "type": "village"},
-    {"name": "Berla", "displayName": "Berla, Bemetara District, Chhattisgarh, India", "lat": 21.5421, "lon": 81.4931, "type": "village"},
+    {"name": "Patan", "displayName": "Patan, Durg District, Chhattisgarh, India", "shortDesc": "Durg, Chhattisgarh", "lat": 21.0392, "lon": 81.5436, "type": "village"},
+    {"name": "Kurud", "displayName": "Kurud, Dhamtari District, Chhattisgarh, India", "shortDesc": "Dhamtari, Chhattisgarh", "lat": 20.8284, "lon": 81.7161, "type": "village"},
+    {"name": "Gunderdehi", "displayName": "Gunderdehi, Balod District, Chhattisgarh, India", "shortDesc": "Balod, Chhattisgarh", "lat": 20.9383, "lon": 81.2891, "type": "village"},
+    {"name": "Abhanpur", "displayName": "Abhanpur, Raipur District, Chhattisgarh, India", "shortDesc": "Raipur, Chhattisgarh", "lat": 21.0531, "lon": 81.7482, "type": "village"},
+    {"name": "Amdi", "displayName": "Amdi Village, Dhamtari District, Chhattisgarh, India", "shortDesc": "Dhamtari, Chhattisgarh", "lat": 20.7812, "lon": 81.5284, "type": "village"},
+    {"name": "Selud", "displayName": "Selud Village, Patan Tahsil, Durg District, Chhattisgarh, India", "shortDesc": "Durg, Chhattisgarh", "lat": 21.0872, "lon": 81.4231, "type": "village"},
+    {"name": "Bori", "displayName": "Bori Village, Dhamdha Tahsil, Durg District, Chhattisgarh, India", "shortDesc": "Durg, Chhattisgarh", "lat": 21.3621, "lon": 81.2483, "type": "village"},
+    {"name": "Arang", "displayName": "Arang, Raipur District, Chhattisgarh, India", "shortDesc": "Raipur, Chhattisgarh", "lat": 21.1942, "lon": 81.9682, "type": "town"},
+    {"name": "Dhamtari", "displayName": "Dhamtari, Chhattisgarh, India", "shortDesc": "Chhattisgarh", "lat": 20.7071, "lon": 81.5492, "type": "city"},
+    {"name": "Bhilai", "displayName": "Bhilai, Durg District, Chhattisgarh, India", "shortDesc": "Durg, Chhattisgarh", "lat": 21.2144, "lon": 81.4332, "type": "city"},
+    {"name": "Durg", "displayName": "Durg, Chhattisgarh, India", "shortDesc": "Chhattisgarh", "lat": 21.1904, "lon": 81.2849, "type": "city"},
+    {"name": "Rajim", "displayName": "Rajim, Gariaband District, Chhattisgarh, India", "shortDesc": "Gariaband, Chhattisgarh", "lat": 20.9634, "lon": 81.8841, "type": "town"},
+    {"name": "Simga", "displayName": "Simga, Baloda Bazar District, Chhattisgarh, India", "shortDesc": "Baloda Bazar, Chhattisgarh", "lat": 21.6322, "lon": 81.7013, "type": "town"},
+    {"name": "Bemetara", "displayName": "Bemetara, Chhattisgarh, India", "shortDesc": "Chhattisgarh", "lat": 21.7052, "lon": 81.5484, "type": "town"},
+    {"name": "Tilda Newra", "displayName": "Tilda Newra, Raipur District, Chhattisgarh, India", "shortDesc": "Raipur, Chhattisgarh", "lat": 21.5642, "lon": 81.8732, "type": "town"},
+    {"name": "Balod", "displayName": "Balod, Chhattisgarh, India", "shortDesc": "Chhattisgarh", "lat": 20.7301, "lon": 81.2052, "type": "town"},
+    {"name": "Raipur", "displayName": "Raipur, Chhattisgarh, India", "shortDesc": "Chhattisgarh", "lat": 21.2514, "lon": 81.6296, "type": "city"},
+    {"name": "Nagri", "displayName": "Nagri, Sihawa, Dhamtari, Chhattisgarh, India", "shortDesc": "Dhamtari, Chhattisgarh", "lat": 20.3541, "lon": 81.8974, "type": "village"},
+    {"name": "Saja", "displayName": "Saja, Bemetara District, Chhattisgarh, India", "shortDesc": "Bemetara, Chhattisgarh", "lat": 21.7331, "lon": 81.2842, "type": "village"},
+    {"name": "Berla", "displayName": "Berla, Bemetara District, Chhattisgarh, India", "shortDesc": "Bemetara, Chhattisgarh", "lat": 21.5421, "lon": 81.4931, "type": "village"},
 ]
 
 
 @app.get("/api/searchVillage")
 async def api_search_village(q: str = "") -> JSONResponse:
     """
-    Search villages and towns across India with real-time Nominatim lookup
-    and local fallback.
+    Search villages and rural localities in India, prioritizing villages, hamlets,
+    and settlements over administrative districts/talukas.
     """
     query = q.strip()
     if len(query) < 2:
         return JSONResponse(status_code=200, content=[])
 
-    # Attempt live OpenStreetMap Nominatim search
     try:
         import httpx
         url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": query,
-            "format": "jsonv2",
-            "countrycodes": "in",
-            "addressdetails": 1,
-            "limit": 8,
-        }
         headers = {"User-Agent": "PondCatchmentAnalysis/1.0 (village-siting-system)"}
+
+        # Search specifically with village designation as well as raw query
+        q_village = query if "village" in query.lower() else f"{query} village"
         async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = []
-                for item in data:
-                    display = item.get("display_name", "")
-                    name = item.get("name") or display.split(",")[0].strip()
-                    results.append({
-                        "name": name,
-                        "displayName": display,
-                        "lat": float(item["lat"]),
-                        "lon": float(item["lon"]),
-                        "type": item.get("type", "village"),
-                    })
-                if results:
-                    return JSONResponse(status_code=200, content=results)
+            resp1 = await client.get(url, params={
+                "q": q_village,
+                "format": "jsonv2",
+                "countrycodes": "in",
+                "addressdetails": 1,
+                "limit": 10,
+            }, headers=headers)
+            resp2 = await client.get(url, params={
+                "q": query,
+                "format": "jsonv2",
+                "countrycodes": "in",
+                "addressdetails": 1,
+                "limit": 8,
+            }, headers=headers)
+
+        items1 = resp1.json() if resp1.status_code == 200 else []
+        items2 = resp2.json() if resp2.status_code == 200 else []
+
+        combined = []
+        seen = set()
+        for item in (items1 + items2):
+            osm_id = item.get("osm_id")
+            if osm_id and osm_id in seen:
+                continue
+            if osm_id:
+                seen.add(osm_id)
+            combined.append(item)
+
+        # Prioritize villages and hamlets first; place administrative districts last
+        def rank_item(it):
+            t = it.get("type", "")
+            c = it.get("category", "")
+            if t == "village":
+                return 0
+            if t in ("hamlet", "isolated_dwelling", "locality"):
+                return 1
+            if t in ("town", "suburb") or c == "place":
+                return 2
+            if t == "city":
+                return 3
+            return 4  # administrative boundary (districts, talukas)
+
+        combined.sort(key=rank_item)
+
+        results = []
+        for item in combined[:10]:
+            display = item.get("display_name", "")
+            name = item.get("name") or display.split(",")[0].strip()
+            item_type = item.get("type", "village")
+            parts = [p.strip() for p in display.split(",")]
+            short_desc = ", ".join(parts[1:-1]) if len(parts) > 2 else display
+            results.append({
+                "name": name,
+                "displayName": display,
+                "shortDesc": short_desc,
+                "lat": float(item["lat"]),
+                "lon": float(item["lon"]),
+                "type": item_type,
+            })
+        if results:
+            return JSONResponse(status_code=200, content=results)
     except Exception as exc:
         logger.warning("Nominatim village search failed (%s), using local fallback", exc)
 

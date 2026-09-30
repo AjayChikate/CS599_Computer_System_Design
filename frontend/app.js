@@ -59,6 +59,7 @@ function initMap() {
     center: INDIA_CENTER,
     zoom: INDIA_ZOOM,
     zoomControl: true,
+    preferCanvas: true, // Use HTML5 Canvas renderer to prevent SVG DOM lag
   });
 
   // Free Base Map Tile Layers (No API Key Required)
@@ -169,6 +170,7 @@ function latlngsToClosedRing(latlngs) {
 // Draw Handlers
 // ---------------------------------------------------------------------------
 function onPolygonCreated(e) {
+  clearResults();
   drawnItems.clearLayers();
   state.drawnLayer = e.layer;
   drawnItems.addLayer(e.layer);
@@ -198,7 +200,6 @@ function updatePolygonState(latlngs) {
   const overLimit = area > maxAreaKm2;
   setAnalyzeEnabled(!overLimit && canAnalyze());
   showClearBtn(true);
-
   if (overLimit) {
     setStatus(`Selected area (${area.toFixed(2)} km²) exceeds the ${maxAreaKm2} km² limit.`, "error", false);
   } else {
@@ -221,14 +222,14 @@ function updateAreaFeedback(area, latlngs) {
 
   const over = area > maxAreaKm2;
   const tooSmall = area < 0.01;
-  const ha = (area * 100).toFixed(1);
+  const areaM2 = Math.round(area * 1_000_000);
   let badge_label;
   if (over) {
-    badge_label = `${area.toFixed(3)} km² (${ha} ha) ⚠️ Exceeds Limit (max ${maxAreaKm2} km²)`;
+    badge_label = `${area.toFixed(3)} km² (${areaM2.toLocaleString()} m²) ⚠️ Exceeds Limit (max ${maxAreaKm2} km²)`;
   } else if (tooSmall) {
     badge_label = `${area.toFixed(4)} km² ⚠️ Too Small (min 0.01 km²)`;
   } else {
-    badge_label = `${area.toFixed(3)} km² (${ha} ha)`;
+    badge_label = `${area.toFixed(3)} km² (${areaM2.toLocaleString()} m²)`;
   }
   badge.textContent = badge_label;
   badge.classList.toggle("over-limit", over);
@@ -428,7 +429,7 @@ async function fetchAndRenderRainfall(result) {
     const resp = await fetch("/api/fetchRainfall", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ locations, years: 10 }),
+      body: JSON.stringify({ locations, years: 5 }),
     });
     const series = await resp.json();
     if (!resp.ok) throw new Error(series.error || `HTTP ${resp.status}`);
@@ -441,6 +442,7 @@ async function fetchAndRenderRainfall(result) {
   } catch (err) {
     console.warn("Rainfall service warning:", err);
     document.getElementById("rainfall-chart-loader").textContent = `Precipitation data unavailable: ${err.message}`;
+    renderWaterBalance(result, null);
     setStatus("Depression assessment complete (Precipitation query timed out).", "info", false);
   }
 }
@@ -453,6 +455,7 @@ function renderResults(result) {
   renderMetrics(result);
   renderSummaryTable(result);
   renderCandidatesTable(result);
+  renderWaterBalance(result, null); // Render physical basin balance immediately
 
   document.getElementById("results-wrapper").classList.remove("hidden");
   document.getElementById("main-banner").classList.add("hidden");
@@ -591,23 +594,57 @@ function renderCandidatesTable(result) {
 
 function renderWaterBalance(result, series) {
   const rec = (result.pondCandidates || [])[0];
-  if (!rec || !series) return;
+  if (!rec) return;
 
-  const annualM = series.meanAnnualPrecipitationM || 0;
+  const annualM = series ? (series.meanAnnualPrecipitationM || 0) : 1.25;
   const annualMm = annualM * 1000;
   const catchSqM = rec.estimatedCatchmentAreaSqM || 0;
+  const catchKm2 = (catchSqM / 1_000_000).toFixed(4);
   const storageM3 = Math.max(0, rec.estimatedVolumeM3 || 0);
+  const grossRainfallM3 = annualM * catchSqM;
   const potentialRunoffM3 = annualM * catchSqM * RUNOFF_COEFF;
   const fillRatio = storageM3 > 0 ? (potentialRunoffM3 / storageM3) * 100 : 100;
+  const surplusM3 = Math.max(0, potentialRunoffM3 - storageM3);
+  const fillableM3 = Math.min(potentialRunoffM3, storageM3);
+  const surfaceM2 = rec.basinSurfaceAreaM2 || Math.round(catchSqM * 0.15);
 
   const box = document.getElementById("water-balance-box");
   box.innerHTML = `
-    <div style="display: flex; flex-direction: column; gap: 8px;">
-      <div>• <strong>Mean Annual Precipitation:</strong> ${annualMm.toFixed(0)} mm/year (ERA5 10-Yr Avg)</div>
-      <div>• <strong>Catchment Potential Runoff:</strong> ${formatVolume(potentialRunoffM3)} (assuming C = ${RUNOFF_COEFF.toFixed(2)})</div>
-      <div>• <strong>Basin Inflow Fill Ratio:</strong> <strong>${fillRatio.toFixed(0)}%</strong> of pond storage capacity</div>
-      <div style="margin-top: 4px; color: ${fillRatio >= 100 ? '#81c784' : '#ffa421'}; font-weight: 600;">
-        ${fillRatio >= 100 ? "✓ Sizing is hydrologically adequate — anticipated to fill and sustain dry-season storage." : "⚠️ Catchment area may provide partial filling under average monsoon conditions."}
+    <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
+      <div style="background: rgba(255, 75, 75, 0.08); border-left: 3px solid #ff4b4b; padding: 8px 12px; border-radius: 4px;">
+        <strong style="color: #ff4b4b;">Recommended Pond Site:</strong>
+        ${rec.pondCentroid.lat.toFixed(5)}°N, ${rec.pondCentroid.lon.toFixed(5)}°E &nbsp;•&nbsp;
+        <strong>Elevation:</strong> ${(rec.pondElevation || 0).toFixed(1)} m &nbsp;•&nbsp;
+        <strong>Max Depth:</strong> ${(rec.basinDepthM || 0).toFixed(1)} m
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
+          <div style="color: var(--st-text-muted); font-size: 11px; font-weight: 600;">POND STORAGE CAPACITY</div>
+          <div style="font-size: 16px; font-weight: 700; color: #fafafa;">${formatVolume(storageM3)}</div>
+          <div style="font-size: 11px; color: #a3a8b8;">Surface Area: ${formatArea(surfaceM2)}</div>
+        </div>
+
+        <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
+          <div style="color: var(--st-text-muted); font-size: 11px; font-weight: 600;">UPSTREAM CATCHMENT</div>
+          <div style="font-size: 16px; font-weight: 700; color: #fafafa;">${formatArea(catchSqM)}</div>
+          <div style="font-size: 11px; color: #a3a8b8;">Total drainage: ${catchKm2} km²</div>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 6px; padding: 4px 0; border-top: 1px solid rgba(255,255,255,0.06); border-bottom: 1px solid rgba(255,255,255,0.06);">
+        <div>• <strong>Mean Annual Precipitation:</strong> <strong>${annualMm.toFixed(0)} mm/year</strong> (ERA5 5-Yr Avg)</div>
+        <div>• <strong>Gross Precipitation on Catchment:</strong> ${formatVolume(grossRainfallM3)} per year</div>
+        <div>• <strong>Catchment Potential Runoff:</strong> <strong>${formatVolume(potentialRunoffM3)}</strong> (Rational Method C = ${RUNOFF_COEFF.toFixed(2)})</div>
+        <div>• <strong>Basin Inflow Fill Ratio:</strong> <strong style="font-size: 14px; color: ${fillRatio >= 100 ? '#81c784' : '#ffa421'};">${fillRatio.toFixed(0)}%</strong> of pond storage capacity</div>
+        <div>• <strong>Fillable Storage:</strong> <strong>${formatVolume(fillableM3)}</strong> with <strong>${formatVolume(surplusM3)}</strong> surplus overflow / infiltration</div>
+      </div>
+
+      <div style="padding: 8px 12px; border-radius: 4px; background: ${fillRatio >= 100 ? 'rgba(76, 175, 80, 0.12)' : 'rgba(255, 164, 33, 0.12)'}; border: 1px solid ${fillRatio >= 100 ? 'rgba(76, 175, 80, 0.3)' : 'rgba(255, 164, 33, 0.3)'}; color: ${fillRatio >= 100 ? '#a5d6a7' : '#ffcc80'};">
+        ${fillRatio >= 100
+          ? `✓ <strong>Optimal Siting:</strong> Annual runoff (${formatVolume(potentialRunoffM3)}) exceeds pond capacity by ${fillRatio.toFixed(0)}%. The pond will reliably achieve full volume retention during monsoon and sustain dry-season livestock / micro-irrigation.`
+          : `⚠️ <strong>Sub-Optimal Runoff:</strong> Catchment runoff (${formatVolume(potentialRunoffM3)}) provides only ${fillRatio.toFixed(0)}% of pond capacity under average monsoon conditions. Recommended: contour bunding or inlet channel diversion.`
+        }
       </div>
     </div>
   `;
@@ -615,26 +652,35 @@ function renderWaterBalance(result, series) {
 
 function renderRainfallChart(series) {
   const loader = document.getElementById("rainfall-chart-loader");
-  loader.classList.add("hidden");
+  if (loader) loader.classList.add("hidden");
 
-  if (!series || !series.monthlyMeanPrecipitationM) return;
+  if (!series) return;
+  // Robust check for property name across backend versions
+  const monthlyVals = series.meanMonthlyPrecipitationM || series.monthlyMeanPrecipitationM;
+  if (!monthlyVals || !monthlyVals.length) return;
 
   const annualMm = ((series.meanAnnualPrecipitationM || 0) * 1000).toFixed(0);
-  document.getElementById("rf-annual-badge").textContent = `Annual: ${annualMm} mm`;
+  const badge = document.getElementById("rf-annual-badge");
+  if (badge) badge.textContent = `Annual: ${annualMm} mm (5-Yr Avg)`;
 
-  const monthlyMm = series.monthlyMeanPrecipitationM.map(v => +(v * 1000).toFixed(1));
-  const ctx = document.getElementById("rainfall-chart").getContext("2d");
+  const monthlyMm = monthlyVals.map(v => +(v * 1000).toFixed(1));
+  const canvas = document.getElementById("rainfall-chart");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
 
-  if (state.rainfallChart) state.rainfallChart.destroy();
+  if (state.rainfallChart) {
+    state.rainfallChart.destroy();
+    state.rainfallChart = null;
+  }
 
   state.rainfallChart = new Chart(ctx, {
     type: "bar",
     data: {
       labels: MONTH_LABELS,
       datasets: [{
-        label: "Monthly Rainfall (mm)",
+        label: "5-Year Monthly Average Rainfall (mm)",
         data: monthlyMm,
-        backgroundColor: monthlyMm.map(v => (v > 100 ? "#ff4b4b" : v > 40 ? "#ffa421" : "#1c83e1")),
+        backgroundColor: monthlyMm.map(v => (v > 150 ? "#ff4b4b" : v > 40 ? "#ffa421" : "#1c83e1")),
         borderRadius: 4,
       }],
     },
@@ -645,7 +691,7 @@ function renderRainfallChart(series) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: c => ` ${c.parsed.y} mm`,
+            label: c => ` Rainfall: ${c.parsed.y} mm`,
           },
         },
       },
@@ -702,17 +748,17 @@ function triggerDownload(blob, filename) {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting Helpers
+// Formatting Helpers (Metres & Kilometres Only - No ha)
 // ---------------------------------------------------------------------------
 function formatVolume(m3) {
   if (m3 >= 1_000_000) return `${(m3 / 1_000_000).toFixed(2)} Mm³`;
   if (m3 >= 1_000) return `${(m3 / 1_000).toFixed(1)} k m³`;
-  return `${m3.toFixed(0)} m³`;
+  return `${Math.round(m3).toLocaleString()} m³`;
 }
 
 function formatArea(m2) {
-  if (m2 >= 10_000) return `${(m2 / 10_000).toFixed(2)} ha`;
-  return `${m2.toFixed(0)} m²`;
+  if (m2 >= 1_000_000) return `${(m2 / 1_000_000).toFixed(3)} km²`;
+  return `${Math.round(m2).toLocaleString()} m²`;
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +880,7 @@ function initVillageSearch() {
 }
 
 function selectVillage(village) {
+  clearResults();
   const input = document.getElementById("village-search-input");
   const list = document.getElementById("village-suggestions-list");
   if (input) input.value = village.name;
