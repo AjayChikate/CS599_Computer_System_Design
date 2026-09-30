@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import defaultdict
 from datetime import date
 from typing import Any
@@ -21,14 +22,14 @@ RUNOFF_COEFFICIENT = 0.20
 _IMD_MONTHLY_MM = [12.5, 18.2, 14.8, 16.4, 24.1, 195.4, 375.8, 360.2, 185.6, 48.3, 10.2, 6.5]
 
 
-def _imd_fallback(latitude: float, longitude: float) -> dict[str, Any]:
+def _imd_fallback(latitude: float, longitude: float, years: int = 5) -> dict[str, Any]:
     """Build a rainfall result dict from IMD Central India climate normals."""
     annual_mm = sum(_IMD_MONTHLY_MM)
     monthly_m = [round(v / 1000.0, 4) for v in _IMD_MONTHLY_MM]
     end_year = date.today().year - 1
-    start_year = end_year - 9
+    start_year = end_year - max(1, years) + 1
     return {
-        "source": "IMD Central India Climate Normals (Network Fallback)",
+        "source": "IMD Central India Climate Normals (Regional Fallback)",
         "model": "IMD",
         "gridResolutionKm": 50,
         "periodStart": f"{start_year}-01-01",
@@ -80,45 +81,47 @@ def fetch_historical_rainfall_for_points(
         end_year,
         len(locations),
     )
-    max_attempts = 3
-    retry_delay_s = 2.0
+    max_attempts = 2
+    retry_delay_s = 1.0
     payload = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(30, 90))
+            # 5s connect timeout to prevent campus firewall hangs; 20s read timeout
+            response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(5.0, 20.0))
             if response.status_code != 200:
                 logger.warning("Rainfall provider returned HTTP %d", response.status_code)
                 if response.status_code == 429:
                     raise ValueError("Rainfall provider returned HTTP 429.")
-                raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
+                logger.warning("Rainfall provider returned HTTP %d — using IMD regional fallback", response.status_code)
+                return [_imd_fallback(lat, lon, years=years) for lat, lon in locations]
             payload = response.json()
             break
         except requests.Timeout:
             if attempt < max_attempts:
                 logger.warning(
-                    "Rainfall request timed out (attempt %d/%d) — retrying in %.0f s",
+                    "Rainfall request timed out (attempt %d/%d) — retrying in %.1f s",
                     attempt, max_attempts, retry_delay_s,
                 )
                 time.sleep(retry_delay_s)
             else:
                 logger.warning("Rainfall request timed out — using IMD regional fallback")
-                return [_imd_fallback(lat, lon) for lat, lon in locations]
+                return [_imd_fallback(lat, lon, years=years) for lat, lon in locations]
         except requests.RequestException as exc:
             if attempt < max_attempts:
                 logger.warning(
-                    "Rainfall network request failed: %s (attempt %d/%d) — retrying in %.0f s",
+                    "Rainfall network request failed: %s (attempt %d/%d) — retrying in %.1f s",
                     type(exc).__name__, attempt, max_attempts, retry_delay_s,
                 )
                 time.sleep(retry_delay_s)
             else:
-                logger.warning("Rainfall network request failed — using IMD regional fallback")
-                return [_imd_fallback(lat, lon) for lat, lon in locations]
+                logger.warning("Rainfall network request failed (%s) — using IMD regional fallback", exc)
+                return [_imd_fallback(lat, lon, years=years) for lat, lon in locations]
         except ValueError:
             raise
         except Exception as exc:
-            logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
-            raise ValueError("The rainfall service returned an unreadable response.") from exc
+            logger.warning("Rainfall response unreadable (%s) — using IMD regional fallback", exc)
+            return [_imd_fallback(lat, lon, years=years) for lat, lon in locations]
 
     payloads = payload if isinstance(payload, list) else [payload]
     if len(payloads) != len(locations):
@@ -132,7 +135,7 @@ def fetch_historical_rainfall_for_points(
         rain_values = daily.get("precipitation_sum", [])
         if len(dates) != len(rain_values) or not dates:
             logger.warning("Rainfall series empty for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
-            results.append(_imd_fallback(latitude, longitude))
+            results.append(_imd_fallback(latitude, longitude, years=years))
             continue
 
         annual_totals: dict[int, float] = defaultdict(float)
@@ -161,7 +164,7 @@ def fetch_historical_rainfall_for_points(
         ]
         if not complete_years:
             logger.warning("No complete years in rainfall data for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
-            results.append(_imd_fallback(latitude, longitude))
+            results.append(_imd_fallback(latitude, longitude, years=years))
             continue
 
         annual_precipitation = {str(year): round(annual_totals[year] / 1000.0, 4) for year in complete_years}

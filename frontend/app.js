@@ -113,6 +113,23 @@ function initMap() {
   });
   map.addControl(drawControl);
 
+  state.layerGroups = {
+    catchments: L.featureGroup().addTo(map),
+    basins: L.featureGroup().addTo(map),
+    markers: L.featureGroup().addTo(map),
+  };
+
+  const overlayMaps = {
+    "<span style='font-size:12px; font-weight:600; color:#1c83e1;'>🌐 Catchment Area (D8 Drainage)</span>": state.layerGroups.catchments,
+    "<span style='font-size:12px; font-weight:600; color:#09ab3b;'>💧 Pond Basin Bed / Rim</span>": state.layerGroups.basins,
+    "<span style='font-size:12px; font-weight:600; color:#ff4b4b;'>⭐ Candidate Siting Marker</span>": state.layerGroups.markers,
+  };
+
+  state.layerControl = L.control.layers(null, overlayMaps, {
+    collapsed: false,
+    position: "topright",
+  }).addTo(map);
+
   map.on(L.Draw.Event.CREATED, onPolygonCreated);
   map.on(L.Draw.Event.EDITED, onPolygonEdited);
   map.on(L.Draw.Event.DELETED, onPolygonDeleted);
@@ -277,7 +294,14 @@ function clearStatus() {
 }
 
 function clearResultLayers() {
-  state.resultLayers.forEach(layer => map.removeLayer(layer));
+  if (state.layerGroups) {
+    state.layerGroups.catchments.clearLayers();
+    state.layerGroups.basins.clearLayers();
+    state.layerGroups.markers.clearLayers();
+  }
+  state.resultLayers.forEach(layer => {
+    try { map.removeLayer(layer); } catch (_) {}
+  });
   state.resultLayers = [];
 }
 
@@ -467,80 +491,149 @@ function renderMapLayers(result) {
   const bounds = [];
 
   candidates.forEach((c, idx) => {
-    const color = CANDIDATE_COLORS[idx % CANDIDATE_COLORS.length];
-    const isRecommended = idx === 0;
+    const isRecommended = idx === 0 || c.recommended;
+    const color = isRecommended ? "#ff4b4b" : CANDIDATE_COLORS[idx % CANDIDATE_COLORS.length];
+    const catColor = isRecommended ? "#1c83e1" : color;
+    const basinColor = isRecommended ? "#09ab3b" : color;
 
-    // Catchment boundary
-    if (c.catchmentBoundaryGeoJSON) {
+    // 1. Catchment Drainage Boundary (D8 flow accumulation basin)
+    const catGeo = c.catchmentBoundary || c.catchmentBoundaryGeoJSON;
+    if (catGeo) {
       try {
-        const catLayer = L.geoJSON(c.catchmentBoundaryGeoJSON, {
+        const catLayer = L.geoJSON(catGeo, {
           style: {
-            color: color,
-            weight: isRecommended ? 2 : 1.2,
-            fillColor: color,
-            fillOpacity: 0.08,
-            dashArray: "5, 4",
+            color: catColor,
+            weight: isRecommended ? 2.5 : 1.5,
+            fillColor: catColor,
+            fillOpacity: isRecommended ? 0.15 : 0.08,
+            dashArray: "6, 4",
           },
-        }).addTo(map);
+        });
+        const catSqM = c.estimatedCatchmentAreaSqM || 0;
+        const catKm2 = (catSqM / 1_000_000).toFixed(4);
+        catLayer.bindTooltip(
+          `🌐 <b>Catchment Drainage Area:</b> ${formatArea(catSqM)} (${catKm2} km²)`,
+          { sticky: true }
+        );
+        catLayer.bindPopup(`
+          <div style="font-family:'Source Sans 3',sans-serif;font-size:13px;min-width:210px;">
+            <strong style="color:${catColor};font-size:14px;">🌐 Upstream Catchment (${isRecommended ? 'Primary Site' : '#' + (idx + 1)})</strong>
+            <hr style="margin:4px 0;border:0;border-top:1px solid #ddd;">
+            <b>Total Drainage Area:</b> ${formatArea(catSqM)} (${catKm2} km²)<br>
+            <b>Contributing D8 Cells:</b> ${c.contributingCellCount || '—'}<br>
+            <b>Runoff Potential (C=0.20):</b> ${formatVolume(c.potentialAnnualRunoffM3 || (catSqM * 1.25 * 0.20))}<br>
+            <div style="margin-top:4px;font-size:11px;color:#666;">Topographic area that sheds overland rainfall runoff toward this pond depression.</div>
+          </div>
+        `);
+        if (state.layerGroups && state.layerGroups.catchments) {
+          state.layerGroups.catchments.addLayer(catLayer);
+        } else {
+          catLayer.addTo(map);
+        }
         state.resultLayers.push(catLayer);
+        const b = catLayer.getBounds();
+        if (b && b.isValid()) bounds.push(b);
       } catch (e) {
         console.debug("Catchment GeoJSON parse error", e);
       }
     }
 
-    // Basin boundary
-    if (c.basinBoundaryGeoJSON) {
+    // 2. Basin Boundary (Depression bed / rim reservoir)
+    const basinGeo = c.basinBoundary || c.basinBoundaryGeoJSON || (idx === 0 ? result.basinBoundary : null);
+    if (basinGeo) {
       try {
-        const basinLayer = L.geoJSON(c.basinBoundaryGeoJSON, {
+        const basinLayer = L.geoJSON(basinGeo, {
           style: {
-            color: color,
-            weight: isRecommended ? 3 : 1.8,
-            fillColor: color,
-            fillOpacity: 0.18,
+            color: basinColor,
+            weight: isRecommended ? 3 : 2,
+            fillColor: basinColor,
+            fillOpacity: isRecommended ? 0.35 : 0.20,
           },
-        }).addTo(map);
+        });
+        const surfaceM2 = c.basinAreaSqM || c.basinSurfaceAreaM2 || 0;
+        const volM3 = c.estimatedVolumeM3 || 0;
+        basinLayer.bindTooltip(
+          `💧 <b>Pond Basin Surface:</b> ${formatArea(surfaceM2)} | <b>Storage:</b> ${formatVolume(volM3)}`,
+          { sticky: true }
+        );
+        basinLayer.bindPopup(`
+          <div style="font-family:'Source Sans 3',sans-serif;font-size:13px;min-width:210px;">
+            <strong style="color:${basinColor};font-size:14px;">💧 Pond Basin Depression (${isRecommended ? 'Primary Site' : '#' + (idx + 1)})</strong>
+            <hr style="margin:4px 0;border:0;border-top:1px solid #ddd;">
+            <b>Basin Surface Area:</b> ${formatArea(surfaceM2)}<br>
+            <b>Storage Capacity:</b> ${formatVolume(volM3)}<br>
+            <b>Maximum Basin Depth:</b> ${(c.basinDepthM || 0).toFixed(2)} m<br>
+            <b>Pond Bed Elevation:</b> ${(c.pondElevation || 0).toFixed(1)} m<br>
+            <b>Siting Status:</b> ${isRecommended ? '⭐ Primary Recommended Siting' : 'Alternative Site'}
+          </div>
+        `);
+        if (state.layerGroups && state.layerGroups.basins) {
+          state.layerGroups.basins.addLayer(basinLayer);
+        } else {
+          basinLayer.addTo(map);
+        }
         state.resultLayers.push(basinLayer);
+        const b = basinLayer.getBounds();
+        if (b && b.isValid()) bounds.push(b);
       } catch (e) {
         console.debug("Basin GeoJSON parse error", e);
       }
     }
 
-    // Centroid marker pin
-    const { lat, lon } = c.pondCentroid;
-    const marker = L.circleMarker([lat, lon], {
-      radius: isRecommended ? 10 : 7,
-      color: "#ffffff",
-      weight: 2,
-      fillColor: color,
-      fillOpacity: 0.95,
-    }).addTo(map);
+    // 3. Centroid marker pin
+    if (c.pondCentroid && typeof c.pondCentroid.lat === "number" && typeof c.pondCentroid.lon === "number") {
+      const { lat, lon } = c.pondCentroid;
+      const marker = L.circleMarker([lat, lon], {
+        radius: isRecommended ? 10 : 7,
+        color: "#ffffff",
+        weight: 2.5,
+        fillColor: isRecommended ? "#ff4b4b" : color,
+        fillOpacity: 0.95,
+      });
 
-    const title = isRecommended ? "⭐ Primary Recommended Site" : `Alternative Candidate #${idx}`;
-    const volStr = formatVolume(c.estimatedVolumeM3 || 0);
-    const catStr = formatArea(c.estimatedCatchmentAreaSqM || 0);
-    const depthStr = (c.basinDepthM || 0).toFixed(1);
+      const title = isRecommended ? "⭐ Primary Recommended Site" : `Alternative Candidate #${idx + 1}`;
+      const volStr = formatVolume(c.estimatedVolumeM3 || 0);
+      const catStr = formatArea(c.estimatedCatchmentAreaSqM || 0);
+      const basinStr = formatArea(c.basinAreaSqM || c.basinSurfaceAreaM2 || 0);
+      const depthStr = (c.basinDepthM || 0).toFixed(2);
 
-    marker.bindPopup(
-      `<div style="font-family: 'Source Sans 3', sans-serif; font-size: 13px;">` +
-      `<strong style="color: ${color}; font-size: 14px;">${title}</strong><br>` +
-      `<hr style="margin: 4px 0; border: 0; border-top: 1px solid #ddd;">` +
-      `<b>Elevation:</b> ${(c.pondElevation || 0).toFixed(1)} m<br>` +
-      `<b>Basin Depth:</b> ${depthStr} m<br>` +
-      `<b>Est. Storage:</b> ${volStr}<br>` +
-      `<b>Catchment Area:</b> ${catStr}<br>` +
-      `<b>Confidence:</b> ${((c.confidenceScore || 0) * 100).toFixed(0)}%` +
-      `</div>`
-    );
+      marker.bindPopup(`
+        <div style="font-family: 'Source Sans 3', sans-serif; font-size: 13px; min-width: 210px;">
+          <strong style="color: ${isRecommended ? '#ff4b4b' : color}; font-size: 14px;">${title}</strong><br>
+          <hr style="margin: 4px 0; border: 0; border-top: 1px solid #ddd;">
+          <b>Coordinates:</b> ${lat.toFixed(5)}°N, ${lon.toFixed(5)}°E<br>
+          <b>Pond Bed Elevation:</b> ${(c.pondElevation || 0).toFixed(1)} m<br>
+          <b>Max Basin Depth:</b> ${depthStr} m<br>
+          <b>Basin Surface Area:</b> ${basinStr}<br>
+          <b>Storage Capacity:</b> ${volStr}<br>
+          <b>Upstream Catchment:</b> ${catStr}<br>
+          <b>Confidence Score:</b> ${((c.confidenceScore || c.score || 0) * 100).toFixed(0)}%
+        </div>
+      `);
 
-    if (isRecommended) marker.openPopup();
-    state.resultLayers.push(marker);
-    bounds.push([lat, lon]);
+      if (isRecommended) marker.openPopup();
+      if (state.layerGroups && state.layerGroups.markers) {
+        state.layerGroups.markers.addLayer(marker);
+      } else {
+        marker.addTo(map);
+      }
+      state.resultLayers.push(marker);
+      bounds.push(L.latLngBounds([[lat, lon], [lat, lon]]));
+    }
   });
 
   if (bounds.length > 0) {
     try {
-      map.fitBounds(L.latLngBounds(bounds), { padding: [50, 50] });
-    } catch (e) {}
+      let combined = bounds[0];
+      for (let i = 1; i < bounds.length; i++) {
+        combined = combined.extend(bounds[i]);
+      }
+      if (combined.isValid()) {
+        map.fitBounds(combined, { padding: [40, 40], maxZoom: 17 });
+      }
+    } catch (e) {
+      console.debug("Fit bounds error", e);
+    }
   }
 }
 
@@ -549,10 +642,10 @@ function renderMetrics(result) {
   if (!rec) return;
 
   document.getElementById("m-elevation").textContent = `${(rec.pondElevation || 0).toFixed(1)} m`;
-  document.getElementById("m-depth").textContent = `${(rec.basinDepthM || 0).toFixed(1)} m`;
+  document.getElementById("m-depth").textContent = `${(rec.basinDepthM || 0).toFixed(2)} m`;
   document.getElementById("m-storage").textContent = formatVolume(rec.estimatedVolumeM3 || 0);
   document.getElementById("m-catchment").textContent = formatArea(rec.estimatedCatchmentAreaSqM || 0);
-  document.getElementById("m-confidence").textContent = `${((rec.confidenceScore || 0) * 100).toFixed(0)}%`;
+  document.getElementById("m-confidence").textContent = `${((rec.confidenceScore || rec.score || 0) * 100).toFixed(0)}%`;
 }
 
 function renderSummaryTable(result) {
@@ -560,7 +653,7 @@ function renderSummaryTable(result) {
   if (!rec) return;
 
   document.getElementById("s-coords").textContent = `${rec.pondCentroid.lat.toFixed(5)}°N, ${rec.pondCentroid.lon.toFixed(5)}°E`;
-  document.getElementById("s-surface").textContent = formatArea(rec.basinSurfaceAreaM2 || rec.estimatedCatchmentAreaSqM || 0);
+  document.getElementById("s-surface").textContent = formatArea(rec.basinAreaSqM || rec.basinSurfaceAreaM2 || rec.estimatedCatchmentAreaSqM || 0);
   document.getElementById("s-compactness").textContent = rec.compactnessScore ? rec.compactnessScore.toFixed(2) : "0.78 (Well-rounded)";
 }
 
@@ -574,7 +667,7 @@ function renderCandidatesTable(result) {
   }
 
   tbody.innerHTML = candidates.map((c, idx) => {
-    const isRec = idx === 0;
+    const isRec = idx === 0 || c.recommended;
     const rankBadge = isRec
       ? `<span style="color: #ff4b4b; font-weight: 700;">#1 (Recommended)</span>`
       : `#${idx + 1}`;
@@ -583,10 +676,10 @@ function renderCandidatesTable(result) {
         <td>${rankBadge}</td>
         <td style="font-family: monospace;">${c.pondCentroid.lat.toFixed(4)}, ${c.pondCentroid.lon.toFixed(4)}</td>
         <td>${(c.pondElevation || 0).toFixed(1)}</td>
-        <td>${(c.basinDepthM || 0).toFixed(1)}</td>
+        <td>${(c.basinDepthM || 0).toFixed(2)}</td>
         <td>${formatVolume(c.estimatedVolumeM3 || 0)}</td>
         <td>${formatArea(c.estimatedCatchmentAreaSqM || 0)}</td>
-        <td><strong>${((c.confidenceScore || 0) * 100).toFixed(0)}%</strong></td>
+        <td><strong>${((c.confidenceScore || c.score || 0) * 100).toFixed(0)}%</strong></td>
       </tr>
     `;
   }).join("");

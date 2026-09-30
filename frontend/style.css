@@ -841,3 +841,34 @@ html, body {
     padding: 20px;
   }
 }
+
+/* ── Leaflet Layer Toggle Control Dark Theme ── */
+.leaflet-control-layers {
+  background: rgba(14, 17, 23, 0.94) !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: var(--st-radius-sm) !important;
+  color: #fafafa !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45) !important;
+  font-family: 'Source Sans 3', sans-serif !important;
+  padding: 8px 12px !important;
+  backdrop-filter: blur(4px);
+}
+
+.leaflet-control-layers-overlays label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  cursor: pointer !important;
+  margin: 5px 0 !important;
+  font-size: 12px !important;
+  color: #e0e2ec !important;
+}
+
+.leaflet-control-layers-overlays label:hover {
+  color: #ffffff !important;
+}
+
+.leaflet-control-layers-separator {
+  border-top-color: rgba(255, 255, 255, 0.12) !important;
+}
+
