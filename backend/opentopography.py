@@ -140,8 +140,9 @@ def _fetch_single_tile(
                     logger.warning("DEM request rate limited by provider")
                     raise ValueError("OpenTopography rate limit reached. Try again later.")
                 if response.status_code != 200:
-                    logger.error("DEM request failed: provider returned HTTP %d", response.status_code)
-                    raise ValueError(f"OpenTopography returned HTTP {response.status_code}.")
+                    err_msg = response.text.strip() if response.text else f"HTTP {response.status_code}"
+                    logger.error("DEM request failed: provider returned HTTP %d — %s", response.status_code, err_msg)
+                    raise ValueError(f"OpenTopography returned HTTP {response.status_code}: {err_msg}")
 
                 # --- Size guard ---
                 cl = response.headers.get("Content-Length")
@@ -291,6 +292,19 @@ def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str =
         OPENTOPO_TILE_KM2=0.4
     """
     west, south, east, north = validate_area_polygon(area_polygon)
+
+    # Ensure a minimum bounding box of at least 0.005° (~550m) so OpenTopography's
+    # raster endpoints (especially AW3D30 and SRTMGL1) do not reject small polygons with HTTP 400.
+    min_span = 0.005
+    if (east - west) < min_span:
+        mid_x = (east + west) / 2
+        west = round(mid_x - min_span / 2, 6)
+        east = round(mid_x + min_span / 2, 6)
+    if (north - south) < min_span:
+        mid_y = (north + south) / 2
+        south = round(mid_y - min_span / 2, 6)
+        north = round(mid_y + min_span / 2, 6)
+
     center_lat = (north + south) / 2
     area_km2   = (east - west) * 111.32 * math.cos(math.radians(center_lat)) * (north - south) * 110.574
 
