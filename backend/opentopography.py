@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import logging
 import os
-import time
 from io import BytesIO
 from pathlib import Path
 from time import perf_counter
@@ -11,9 +11,9 @@ from typing import Any, Sequence, Tuple
 from xml.etree import ElementTree as ET
 
 import contourpy
+import httpx
 import numpy as np
 import rasterio
-import requests
 from rasterio.io import MemoryFile
 from rasterio.warp import transform as transform_coordinates, transform_geom
 from dotenv import load_dotenv
@@ -87,7 +87,8 @@ def _configured_api_key() -> str:
     return os.getenv("API_Key", "").strip()
 
 
-def _fetch_single_tile(
+
+async def _fetch_single_tile(
     west: float,
     south: float,
     east: float,
@@ -102,6 +103,9 @@ def _fetch_single_tile(
 
     Retries on ConnectionError and Timeout only.  HTTP errors such as 401 /
     429 / 204 are permanent — they raise immediately without retrying.
+
+    Uses async httpx so the FastAPI event loop is NOT blocked during the
+    10-16 s OpenTopography response time (campus-network safe).
     """
     center_lat = (north + south) / 2
     tile_area_km2 = (
@@ -121,65 +125,48 @@ def _fetch_single_tile(
     for attempt in range(1, max_attempts + 1):
         t0 = perf_counter()
         try:
-            with requests.get(
-                OPENTOPOGRAPHY_URL, params=params, stream=True, timeout=(30, 180)
-            ) as response:
-                elapsed = perf_counter() - t0
-                logger.info(
-                    "DEM provider responded: status=%d response_time=%.2f s bbox_area=%.3f km^2",
-                    response.status_code, elapsed, tile_area_km2,
-                )
-                # --- Permanent HTTP failures (no retry) ---
-                if response.status_code == 401:
-                    logger.error("DEM request rejected: provider returned HTTP 401")
-                    raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
-                if response.status_code == 204:
-                    logger.warning("DEM request returned no data for selected bounds")
-                    raise ValueError("OpenTopography has no elevation data for this area.")
-                if response.status_code == 429:
-                    logger.warning("DEM request rate limited by provider")
-                    raise ValueError("OpenTopography rate limit reached. Try again later.")
-                if response.status_code != 200:
-                    err_msg = response.text.strip() if response.text else f"HTTP {response.status_code}"
-                    logger.error("DEM request failed: provider returned HTTP %d — %s", response.status_code, err_msg)
-                    raise ValueError(f"OpenTopography returned HTTP {response.status_code}: {err_msg}")
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=180.0)) as client:
+                response = await client.get(OPENTOPOGRAPHY_URL, params=params)
 
-                # --- Size guard ---
-                cl = response.headers.get("Content-Length")
-                if cl:
-                    try:
-                        declared = int(cl)
-                    except ValueError as exc:
-                        raise ValueError("OpenTopography returned an invalid Content-Length.") from exc
-                    if declared > MAX_DEM_BYTES:
-                        raise ValueError("The downloaded elevation grid exceeds the 32 MB limit.")
+            elapsed = perf_counter() - t0
+            logger.info(
+                "DEM provider responded: status=%d response_time=%.2f s bbox_area=%.3f km^2",
+                response.status_code, elapsed, tile_area_km2,
+            )
+            # --- Permanent HTTP failures (no retry) ---
+            if response.status_code == 401:
+                logger.error("DEM request rejected: provider returned HTTP 401")
+                raise ValueError("OpenTopography rejected the API key. Check the key and try again.")
+            if response.status_code == 204:
+                logger.warning("DEM request returned no data for selected bounds")
+                raise ValueError("OpenTopography has no elevation data for this area.")
+            if response.status_code == 429:
+                logger.warning("DEM request rate limited by provider")
+                raise ValueError("OpenTopography rate limit reached. Try again later.")
+            if response.status_code != 200:
+                err_msg = response.text.strip() if response.text else f"HTTP {response.status_code}"
+                logger.error("DEM request failed: provider returned HTTP %d — %s", response.status_code, err_msg)
+                raise ValueError(f"OpenTopography returned HTTP {response.status_code}: {err_msg}")
 
-                # --- Stream download ---
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > MAX_DEM_BYTES:
-                        raise ValueError("The downloaded elevation grid exceeds the 32 MB limit.")
-                    chunks.append(chunk)
+            # --- Size guard ---
+            dem_bytes = response.content
+            if len(dem_bytes) > MAX_DEM_BYTES:
+                raise ValueError("The downloaded elevation grid exceeds the 32 MB limit.")
 
-                dem_bytes = b"".join(chunks)
-                logger.info(
-                    "DEM download complete: bytes=%d total_time=%.2f s",
-                    len(dem_bytes), perf_counter() - t0,
-                )
-                return dem_bytes
+            logger.info(
+                "DEM download complete: bytes=%d total_time=%.2f s",
+                len(dem_bytes), perf_counter() - t0,
+            )
+            return dem_bytes
 
-        except requests.Timeout:
+        except httpx.TimeoutException:
             elapsed = perf_counter() - t0
             if attempt < max_attempts:
                 logger.warning(
                     "DEM tile timed out after %.2f s (attempt %d/%d) — retrying in %.0f s",
                     elapsed, attempt, max_attempts, retry_delay_s,
                 )
-                time.sleep(retry_delay_s)
+                await asyncio.sleep(retry_delay_s)
             else:
                 logger.warning(
                     "DEM tile timed out after %.2f s (all %d attempts exhausted)",
@@ -190,14 +177,14 @@ def _fetch_single_tile(
                     "Try a smaller area or retry later."
                 ) from None
 
-        except requests.RequestException as exc:
+        except httpx.RequestError as exc:
             elapsed = perf_counter() - t0
             if attempt < max_attempts:
                 logger.warning(
                     "DEM tile network error: %s (attempt %d/%d) — retrying in %.0f s",
                     type(exc).__name__, attempt, max_attempts, retry_delay_s,
                 )
-                time.sleep(retry_delay_s)
+                await asyncio.sleep(retry_delay_s)
             else:
                 logger.error(
                     "DEM tile network error: %s (all %d attempts exhausted)",
@@ -278,7 +265,7 @@ def _mosaic_dem_tiles(tile_bytes_list: list[bytes]) -> bytes:
                 pass
 
 
-def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30") -> bytes:
+async def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30") -> bytes:
     """Download a DEM for *area_polygon* from OpenTopography.
 
     If ``OPENTOPO_TILE_KM2`` is set in the environment, large requests are
@@ -328,20 +315,21 @@ def fetch_global_dem(area_polygon: Sequence[Tuple[float, float]], dataset: str =
             "DEM tiled download: area=%.2f km² split into %d tiles (max %.2f km² each)",
             area_km2, len(tiles), _TILE_KM2,
         )
-        tile_bytes_list: list[bytes] = []
         for i, (tw, ts, te, tn) in enumerate(tiles, 1):
             t_area = (te - tw) * 111.32 * math.cos(math.radians((tn + ts) / 2)) * (tn - ts) * 110.574
             logger.info(
                 "DEM tile %d/%d: bbox=[%.5f, %.5f, %.5f, %.5f] area=%.3f km²",
                 i, len(tiles), tw, ts, te, tn, t_area,
             )
-            tile_bytes_list.append(
-                _fetch_single_tile(tw, ts, te, tn, dataset, api_key)
-            )
+        # Fetch all tiles concurrently — each is a separate short-lived TCP request
+        tile_bytes_list: list[bytes] = list(await asyncio.gather(*[
+            _fetch_single_tile(tw, ts, te, tn, dataset, api_key)
+            for tw, ts, te, tn in tiles
+        ]))
         return _mosaic_dem_tiles(tile_bytes_list)
 
     # ── Direct single-request download ───────────────────────────────────────
-    return _fetch_single_tile(west, south, east, north, dataset, api_key)
+    return await _fetch_single_tile(west, south, east, north, dataset, api_key)
 
 
 def _inside_or_on_edge(point: Tuple[float, float], polygon: Sequence[Tuple[float, float]]) -> bool:
@@ -498,7 +486,7 @@ def generate_contour_kml(
         raise ValueError("OpenTopography did not return a readable GeoTIFF elevation grid.") from exc
 
 
-def analyze_dem_area(
+async def analyze_dem_area(
     area_polygon: Sequence[Tuple[float, float]], dataset: str = "COP30"
 ) -> tuple[bytes, dict[str, Any]]:
     from .parsing import parse_kml_text
@@ -506,7 +494,7 @@ def analyze_dem_area(
 
     analysis_started = perf_counter()
     logger.info("Terrain analysis started: dataset=%s polygon_vertices=%d", dataset, len(area_polygon))
-    dem_bytes = fetch_global_dem(area_polygon, dataset)
+    dem_bytes = await fetch_global_dem(area_polygon, dataset)
     kml_bytes = generate_contour_kml(dem_bytes, area_polygon, dataset)
     raw_contours = parse_kml_text(kml_bytes.decode("utf-8"))
     logger.info("Terrain analysis received %d closed contours", len(raw_contours))

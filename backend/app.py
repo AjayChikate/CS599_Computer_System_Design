@@ -39,12 +39,12 @@ try:
     from .config import MAX_UPLOAD_BYTES
     from .service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
     from .opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
-    from .rainfall import fetch_historical_rainfall_for_points
+    from .rainfall import fetch_historical_rainfall_for_points_async
 except ImportError:
     from config import MAX_UPLOAD_BYTES
     from service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
     from opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
-    from rainfall import fetch_historical_rainfall_for_points
+    from rainfall import fetch_historical_rainfall_for_points_async
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -234,7 +234,7 @@ async def api_analyze_dem_area(request: DemAnalysisRequest) -> JSONResponse:
             "DEM area API request: dataset=%s polygon_vertices=%d",
             request.dataset, len(polygon),
         )
-        kml_bytes, result = analyze_dem_area(polygon, request.dataset)
+        kml_bytes, result = await analyze_dem_area(polygon, request.dataset)
         logger.info(
             "DEM area API completed: status=%s candidates=%d kml_bytes=%d",
             result.get("status"), len(result.get("pondCandidates", [])), len(kml_bytes),
@@ -269,7 +269,7 @@ async def api_fetch_rainfall(request: RainfallRequest) -> JSONResponse:
         logger.info(
             "Rainfall API request: points=%d years=%d", len(locations), request.years,
         )
-        series = fetch_historical_rainfall_for_points(locations, request.years)
+        series = await fetch_historical_rainfall_for_points_async(locations, request.years)
         logger.info("Rainfall API completed: returned %d series", len(series))
         return JSONResponse(status_code=200, content=series)
     except ValueError as exc:
