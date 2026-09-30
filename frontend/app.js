@@ -460,7 +460,8 @@ async function fetchAndRenderRainfall(result) {
     setTimeout(clearStatus, 4000);
   } catch (err) {
     console.warn("Rainfall service warning:", err);
-    document.getElementById("rainfall-chart-loader").textContent = `Precipitation data unavailable: ${err.message}`;
+    const rfLoader = document.getElementById("rainfall-chart-loader");
+    if (rfLoader) rfLoader.textContent = `Precipitation data unavailable: ${err.message}`;
     renderWaterBalance(result, null);
     setStatus("Depression assessment complete (Precipitation query timed out).", "info", false);
   }
@@ -636,24 +637,35 @@ function renderMetrics(result) {
   const rec = (result.pondCandidates || [])[0];
   if (!rec) return;
 
-  document.getElementById("m-elevation").textContent = `${(rec.pondElevation || 0).toFixed(1)} m`;
-  document.getElementById("m-depth").textContent = `${(rec.basinDepthM || 0).toFixed(2)} m`;
-  document.getElementById("m-storage").textContent = formatVolume(rec.estimatedVolumeM3 || 0);
-  document.getElementById("m-catchment").textContent = formatArea(rec.estimatedCatchmentAreaSqM || 0);
-  document.getElementById("m-confidence").textContent = `${((rec.confidenceScore || rec.score || 0) * 100).toFixed(0)}%`;
+  const setVal = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+
+  setVal("m-elevation", `${(rec.pondElevation || 0).toFixed(1)} m`);
+  setVal("m-depth", `${(rec.basinDepthM || 0).toFixed(2)} m`);
+  setVal("m-storage", formatVolume(rec.estimatedVolumeM3 || 0));
+  setVal("m-catchment", formatArea(rec.estimatedCatchmentAreaSqM || 0));
+  setVal("m-confidence", `${((rec.confidenceScore || rec.score || 0) * 100).toFixed(0)}%`);
 }
 
 function renderSummaryTable(result) {
   const rec = (result.pondCandidates || [])[0];
   if (!rec) return;
 
-  document.getElementById("s-coords").textContent = `${rec.pondCentroid.lat.toFixed(5)}°N, ${rec.pondCentroid.lon.toFixed(5)}°E`;
-  document.getElementById("s-surface").textContent = formatArea(rec.basinAreaSqM || rec.basinSurfaceAreaM2 || rec.estimatedCatchmentAreaSqM || 0);
-  document.getElementById("s-compactness").textContent = rec.compactnessScore ? rec.compactnessScore.toFixed(2) : "0.78 (Well-rounded)";
+  const setVal = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+
+  setVal("s-coords", `${rec.pondCentroid.lat.toFixed(5)}°N, ${rec.pondCentroid.lon.toFixed(5)}°E`);
+  setVal("s-surface", formatArea(rec.basinAreaSqM || rec.basinSurfaceAreaM2 || rec.estimatedCatchmentAreaSqM || 0));
+  setVal("s-compactness", rec.compactnessScore ? rec.compactnessScore.toFixed(2) : "0.78 (Well-rounded)");
 }
 
 function renderCandidatesTable(result) {
   const tbody = document.getElementById("candidates-tbody");
+  if (!tbody) return;
   const candidates = result.pondCandidates || [];
 
   if (!candidates.length) {
@@ -697,6 +709,7 @@ function renderWaterBalance(result, series) {
   const surfaceM2 = rec.basinSurfaceAreaM2 || Math.round(catchSqM * 0.15);
 
   const box = document.getElementById("water-balance-box");
+  if (!box) return;
   box.innerHTML = `
     <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px;">
       <div style="background: rgba(255, 75, 75, 0.08); border-left: 3px solid #ff4b4b; padding: 8px 12px; border-radius: 4px;">
