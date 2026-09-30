@@ -32,19 +32,21 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logging.getLogger("backend").setLevel(logging.INFO)
+from starlette.concurrency import run_in_threadpool
+
 logging.getLogger("uvicorn.access").addFilter(_StreamlitNoiseFilter())
 logger = logging.getLogger(__name__)
 
 try:
     from .config import MAX_UPLOAD_BYTES
     from .service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
-    from .opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
-    from .rainfall import fetch_historical_rainfall_for_points_async
+    from .opentopography import DATASET_RESOLUTIONS, MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
+    from .rainfall import fetch_historical_rainfall_for_points
 except ImportError:
     from config import MAX_UPLOAD_BYTES
     from service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
-    from opentopography import MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
-    from rainfall import fetch_historical_rainfall_for_points_async
+    from opentopography import DATASET_RESOLUTIONS, MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
+    from rainfall import fetch_historical_rainfall_for_points
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -69,6 +71,7 @@ class DemAnalysisRequest(BaseModel):
     """Request body for /api/analyzeDemArea — download DEM and run full pipeline."""
     area_polygon: List[List[float]]  # [[lon, lat], ...] closed ring, ≤ 0.5 km²
     dataset: str = "COP30"           # AW3D30 | COP30 | SRTMGL1
+    resolution_m: float = 10.0       # Spatial resolution in meters (e.g. 5, 10, 30)
 
 
 class RainfallRequest(BaseModel):
@@ -122,7 +125,81 @@ def get_config() -> dict[str, Any]:
     return {
         "max_area_km2": MAX_AREA_KM2,
         "tile_km2": _TILE_KM2,
+        "datasets": DATASET_RESOLUTIONS,
     }
+
+
+# Curated instant fallback for prominent Indian/Chhattisgarh agricultural locations
+_FALLBACK_VILLAGES = [
+    {"name": "Patan", "displayName": "Patan, Durg District, Chhattisgarh, India", "lat": 21.0392, "lon": 81.5436, "type": "village"},
+    {"name": "Kurud", "displayName": "Kurud, Dhamtari District, Chhattisgarh, India", "lat": 20.8284, "lon": 81.7161, "type": "village"},
+    {"name": "Gunderdehi", "displayName": "Gunderdehi, Balod District, Chhattisgarh, India", "lat": 20.9383, "lon": 81.2891, "type": "village"},
+    {"name": "Abhanpur", "displayName": "Abhanpur, Raipur District, Chhattisgarh, India", "lat": 21.0531, "lon": 81.7482, "type": "village"},
+    {"name": "Arang", "displayName": "Arang, Raipur District, Chhattisgarh, India", "lat": 21.1942, "lon": 81.9682, "type": "town"},
+    {"name": "Dhamtari", "displayName": "Dhamtari, Chhattisgarh, India", "lat": 20.7071, "lon": 81.5492, "type": "city"},
+    {"name": "Bhilai", "displayName": "Bhilai, Durg District, Chhattisgarh, India", "lat": 21.2144, "lon": 81.4332, "type": "city"},
+    {"name": "Durg", "displayName": "Durg, Chhattisgarh, India", "lat": 21.1904, "lon": 81.2849, "type": "city"},
+    {"name": "Rajim", "displayName": "Rajim, Gariaband District, Chhattisgarh, India", "lat": 20.9634, "lon": 81.8841, "type": "town"},
+    {"name": "Simga", "displayName": "Simga, Baloda Bazar District, Chhattisgarh, India", "lat": 21.6322, "lon": 81.7013, "type": "town"},
+    {"name": "Bemetara", "displayName": "Bemetara, Chhattisgarh, India", "lat": 21.7052, "lon": 81.5484, "type": "town"},
+    {"name": "Tilda Newra", "displayName": "Tilda Newra, Raipur District, Chhattisgarh, India", "lat": 21.5642, "lon": 81.8732, "type": "town"},
+    {"name": "Balod", "displayName": "Balod, Chhattisgarh, India", "lat": 20.7301, "lon": 81.2052, "type": "town"},
+    {"name": "Raipur", "displayName": "Raipur, Chhattisgarh, India", "lat": 21.2514, "lon": 81.6296, "type": "city"},
+    {"name": "Nagri", "displayName": "Nagri, Sihawa, Dhamtari, Chhattisgarh, India", "lat": 20.3541, "lon": 81.8974, "type": "village"},
+    {"name": "Saja", "displayName": "Saja, Bemetara District, Chhattisgarh, India", "lat": 21.7331, "lon": 81.2842, "type": "village"},
+    {"name": "Berla", "displayName": "Berla, Bemetara District, Chhattisgarh, India", "lat": 21.5421, "lon": 81.4931, "type": "village"},
+]
+
+
+@app.get("/api/searchVillage")
+async def api_search_village(q: str = "") -> JSONResponse:
+    """
+    Search villages and towns across India with real-time Nominatim lookup
+    and local fallback.
+    """
+    query = q.strip()
+    if len(query) < 2:
+        return JSONResponse(status_code=200, content=[])
+
+    # Attempt live OpenStreetMap Nominatim search
+    try:
+        import httpx
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": query,
+            "format": "jsonv2",
+            "countrycodes": "in",
+            "addressdetails": 1,
+            "limit": 8,
+        }
+        headers = {"User-Agent": "PondCatchmentAnalysis/1.0 (village-siting-system)"}
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                results = []
+                for item in data:
+                    display = item.get("display_name", "")
+                    name = item.get("name") or display.split(",")[0].strip()
+                    results.append({
+                        "name": name,
+                        "displayName": display,
+                        "lat": float(item["lat"]),
+                        "lon": float(item["lon"]),
+                        "type": item.get("type", "village"),
+                    })
+                if results:
+                    return JSONResponse(status_code=200, content=results)
+    except Exception as exc:
+        logger.warning("Nominatim village search failed (%s), using local fallback", exc)
+
+    # Local fallback search
+    q_lower = query.lower()
+    matches = [
+        v for v in _FALLBACK_VILLAGES
+        if q_lower in v["name"].lower() or q_lower in v["displayName"].lower()
+    ]
+    return JSONResponse(status_code=200, content=matches[:8])
 
 
 
@@ -231,10 +308,12 @@ async def api_analyze_dem_area(request: DemAnalysisRequest) -> JSONResponse:
         if len(polygon) < 4:
             raise ValueError("area_polygon must have at least 4 vertices forming a closed ring.")
         logger.info(
-            "DEM area API request: dataset=%s polygon_vertices=%d",
-            request.dataset, len(polygon),
+            "DEM area API request: dataset=%s res=%.1fm polygon_vertices=%d",
+            request.dataset, request.resolution_m, len(polygon),
         )
-        kml_bytes, result = await analyze_dem_area(polygon, request.dataset)
+        kml_bytes, result = await run_in_threadpool(
+            analyze_dem_area, polygon, request.dataset, request.resolution_m
+        )
         logger.info(
             "DEM area API completed: status=%s candidates=%d kml_bytes=%d",
             result.get("status"), len(result.get("pondCandidates", [])), len(kml_bytes),
@@ -269,7 +348,7 @@ async def api_fetch_rainfall(request: RainfallRequest) -> JSONResponse:
         logger.info(
             "Rainfall API request: points=%d years=%d", len(locations), request.years,
         )
-        series = await fetch_historical_rainfall_for_points_async(locations, request.years)
+        series = await run_in_threadpool(fetch_historical_rainfall_for_points, locations, request.years)
         logger.info("Rainfall API completed: returned %d series", len(series))
         return JSONResponse(status_code=200, content=series)
     except ValueError as exc:

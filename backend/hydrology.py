@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any, Sequence, Tuple
 
 import numpy as np
@@ -24,8 +25,8 @@ from scipy.ndimage import label
 from .opentopography import MAX_GRID_CELLS, validate_area_polygon
 
 logger = logging.getLogger(__name__)
-MIN_DEPRESSION_DEPTH_M = 1.0
-MIN_DEPRESSION_CELLS = 3
+MIN_DEPRESSION_DEPTH_M = float(os.getenv("MIN_DEPRESSION_DEPTH_M", "0.20"))
+MIN_DEPRESSION_CELLS = int(os.getenv("MIN_DEPRESSION_CELLS", "3"))
 MAX_DEM_CANDIDATES = 12
 MAX_CATCHMENT_EVALUATIONS = 100
 NODATA_VALUE = -9999.0

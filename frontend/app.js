@@ -44,6 +44,9 @@ const state = {
   kmlB64: null,
   resultLayers: [],
   rainfallChart: null,
+  villageMarker: null,
+  currentSuggestions: [],
+  selectedSuggestionIndex: -1,
 };
 
 // ---------------------------------------------------------------------------
@@ -218,14 +221,14 @@ function updateAreaFeedback(area, latlngs) {
 
   const over = area > maxAreaKm2;
   const tooSmall = area < 0.01;
+  const ha = (area * 100).toFixed(1);
   let badge_label;
   if (over) {
-    badge_label = `${area.toFixed(3)} km² ⚠️ Too Large (max ${maxAreaKm2} km²)`;
+    badge_label = `${area.toFixed(3)} km² (${ha} ha) ⚠️ Exceeds Limit (max ${maxAreaKm2} km²)`;
   } else if (tooSmall) {
     badge_label = `${area.toFixed(4)} km² ⚠️ Too Small (min 0.01 km²)`;
   } else {
-    const quality = area <= 0.3 ? "✓ Ideal" : area <= maxAreaKm2 ? "⚡ OK" : "";
-    badge_label = `${area.toFixed(3)} km² ${quality}`;
+    badge_label = `${area.toFixed(3)} km² (${ha} ha)`;
   }
   badge.textContent = badge_label;
   badge.classList.toggle("over-limit", over);
@@ -340,15 +343,22 @@ async function analyzeDem() {
   }
 
   const dataset = document.getElementById("dataset-select").value;
+  const resolutionSelect = document.getElementById("resolution-select");
+  const resolutionM = resolutionSelect ? parseFloat(resolutionSelect.value) : 10.0;
+
   clearResults();
-  setStatus(`Fetching ${dataset} terrain data & computing D8 hydrology...`, "info", true);
+  setStatus(`Fetching ${dataset} (${resolutionM}m village scale) & computing D8 hydrology...`, "info", true);
   document.getElementById("btn-run-analysis").disabled = true;
 
   try {
     const resp = await fetch("/api/analyzeDemArea", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ area_polygon: state.polygon, dataset }),
+      body: JSON.stringify({
+        area_polygon: state.polygon,
+        dataset,
+        resolution_m: resolutionM,
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -708,9 +718,169 @@ function formatArea(m2) {
 // ---------------------------------------------------------------------------
 // Event Listeners & Bootstrapping
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Village Search & Real-Time Map Reflection
+// ---------------------------------------------------------------------------
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function initVillageSearch() {
+  const input = document.getElementById("village-search-input");
+  const spinner = document.getElementById("village-search-spinner");
+  const list = document.getElementById("village-suggestions-list");
+  if (!input || !list) return;
+
+  let debounceTimer = null;
+
+  async function fetchSuggestions(query) {
+    if (!query || query.length < 2) {
+      list.classList.add("hidden");
+      list.innerHTML = "";
+      state.currentSuggestions = [];
+      state.selectedSuggestionIndex = -1;
+      return;
+    }
+
+    if (spinner) spinner.classList.remove("hidden");
+    try {
+      const res = await fetch(`/api/searchVillage?q=${encodeURIComponent(query)}`);
+      if (!res.ok) throw new Error("Search failed");
+      const suggestions = await res.json();
+      state.currentSuggestions = suggestions || [];
+      state.selectedSuggestionIndex = -1;
+
+      if (suggestions && suggestions.length > 0) {
+        list.innerHTML = suggestions.map((item, idx) => `
+          <li class="village-suggestion-item" data-idx="${idx}">
+            <div class="village-item-name">📍 ${escapeHtml(item.name)}</div>
+            <div class="village-item-desc">${escapeHtml(item.displayName)}</div>
+          </li>
+        `).join("");
+        list.classList.remove("hidden");
+      } else {
+        list.innerHTML = `<li class="village-suggestion-item" style="cursor:default;color:#808495;">No villages found for "${escapeHtml(query)}"</li>`;
+        list.classList.remove("hidden");
+      }
+    } catch (err) {
+      console.debug("Village search error:", err);
+      list.classList.add("hidden");
+    } finally {
+      if (spinner) spinner.classList.add("hidden");
+    }
+  }
+
+  input.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    const query = input.value.trim();
+    debounceTimer = setTimeout(() => {
+      fetchSuggestions(query);
+    }, 250);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    const items = list.querySelectorAll(".village-suggestion-item");
+    if (items.length === 0 || list.classList.contains("hidden")) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      state.selectedSuggestionIndex = (state.selectedSuggestionIndex + 1) % items.length;
+      updateSuggestionHighlight(items);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      state.selectedSuggestionIndex = (state.selectedSuggestionIndex - 1 + items.length) % items.length;
+      updateSuggestionHighlight(items);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (state.selectedSuggestionIndex >= 0 && state.currentSuggestions[state.selectedSuggestionIndex]) {
+        selectVillage(state.currentSuggestions[state.selectedSuggestionIndex]);
+      } else if (state.currentSuggestions.length > 0) {
+        selectVillage(state.currentSuggestions[0]);
+      }
+    } else if (e.key === "Escape") {
+      list.classList.add("hidden");
+    }
+  });
+
+  function updateSuggestionHighlight(items) {
+    items.forEach((item, idx) => {
+      item.classList.toggle("highlighted", idx === state.selectedSuggestionIndex);
+      if (idx === state.selectedSuggestionIndex) {
+        item.scrollIntoView({ block: "nearest" });
+      }
+    });
+  }
+
+  list.addEventListener("click", (e) => {
+    const item = e.target.closest(".village-suggestion-item");
+    if (!item || item.dataset.idx === undefined) return;
+    const idx = parseInt(item.dataset.idx, 10);
+    if (state.currentSuggestions[idx]) {
+      selectVillage(state.currentSuggestions[idx]);
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".village-search-widget")) {
+      list.classList.add("hidden");
+    }
+  });
+}
+
+function selectVillage(village) {
+  const input = document.getElementById("village-search-input");
+  const list = document.getElementById("village-suggestions-list");
+  if (input) input.value = village.name;
+  if (list) list.classList.add("hidden");
+
+  // Smooth real-time flyTo on Leaflet map
+  map.flyTo([village.lat, village.lon], 15, {
+    animate: true,
+    duration: 1.5,
+  });
+
+  // Highlight village location with Leaflet marker
+  if (state.villageMarker) {
+    map.removeLayer(state.villageMarker);
+  }
+
+  const villageIcon = L.divIcon({
+    className: "village-leaflet-pin",
+    html: `<div style="background:#ff4b4b;color:#fff;padding:4px 8px;border-radius:12px;font-size:12px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,0.5);display:flex;align-items:center;gap:4px;white-space:nowrap;border:2px solid #fff;">📍 ${escapeHtml(village.name)}</div>`,
+    iconSize: [110, 30],
+    iconAnchor: [55, 15],
+  });
+
+  state.villageMarker = L.marker([village.lat, village.lon], { icon: villageIcon })
+    .addTo(map)
+    .bindPopup(`
+      <div style="font-family:'Source Sans 3',sans-serif;color:#0e1117;">
+        <h4 style="margin:0 0 4px 0;font-size:15px;color:#ff4b4b;">📍 ${escapeHtml(village.name)}</h4>
+        <p style="margin:0 0 6px 0;font-size:12px;color:#555;">${escapeHtml(village.displayName)}</p>
+        <div style="font-size:11px;background:#f0f2f6;padding:4px 8px;border-radius:4px;margin-bottom:6px;">
+          Coordinates: <strong>${village.lat.toFixed(4)}, ${village.lon.toFixed(4)}</strong>
+        </div>
+        <p style="margin:0;font-size:12px;font-weight:600;color:#09ab3b;">
+          ✏️ Ready! Outline the catchment area with the polygon tool ⬡ (top-right)!
+        </p>
+      </div>
+    `, { maxWidth: 280 })
+    .openPopup();
+}
+
+// ---------------------------------------------------------------------------
+// Event Listeners & Bootstrapping
+// ---------------------------------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
   initMap();
   loadConfig();
+  initVillageSearch();
 
   // Mode radio clicks
   document.querySelectorAll(".st-radio-option").forEach(opt => {

@@ -32,6 +32,24 @@
 
         <hr class="st-divider" />
 
+        <!-- Village Search & Dropdown (Real-time Leaflet Map Reflection) -->
+        <div class="st-widget village-search-widget">
+          <label for="village-search-input" class="st-label">📍 Search Village / Locality</label>
+          <div class="village-search-wrapper">
+            <input
+              type="text"
+              id="village-search-input"
+              class="st-input"
+              placeholder="Type village name (e.g. Patan, Kurud, Bhilai)..."
+              autocomplete="off"
+            />
+            <span id="village-search-spinner" class="village-spinner hidden"></span>
+            <ul id="village-suggestions-list" class="village-suggestions hidden"></ul>
+          </div>
+        </div>
+
+        <hr class="st-divider" />
+
         <!-- Mode Radio (Streamlit st.radio style) -->
         <div class="st-widget">
           <label class="st-label">Analysis Source</label>
@@ -60,10 +78,18 @@
             </select>
           </div>
 
+          <div class="st-widget">
+            <label for="resolution-select" class="st-label">Spatial Resolution (Village Scale)</label>
+            <select id="resolution-select" class="st-select">
+              <option value="10" selected>10m — Village Level (Interpolated High Detail)</option>
+              <option value="5">5m — Micro-Catchment (Sub-Pixel Detail)</option>
+              <option value="30">30m — Native Satellite Grid</option>
+            </select>
+          </div>
+
           <div class="st-alert st-alert-info">
             <span class="alert-icon">ℹ️</span>
-            <div>Use the polygon tool ⬡ on the map to outline the pond site area.<br>
-              <strong>Max: <span id="max-area-hint">0.5 km²</span></strong> · Ideal: 0.1–0.3 km² (village pond scale)</div>
+            <div>Use the polygon tool ⬡ on the map to outline the target village catchment area (Max allowed: <strong id="max-area-hint">0.5 km²</strong>).</div>
           </div>
         </div>
 

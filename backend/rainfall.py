@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import date
 from typing import Any
 
-import httpx
+import requests
 
 logger = logging.getLogger(__name__)
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -47,46 +47,9 @@ def fetch_historical_rainfall(
     return fetch_historical_rainfall_for_points([(latitude, longitude)], years)[0]
 
 
-async def _fetch_single_location_async(
-    client: httpx.AsyncClient,
-    latitude: float,
-    longitude: float,
-    start_year: int,
-    end_year: int,
-) -> dict[str, Any] | None:
-    """
-    Fetch ERA5 daily precipitation for a single location using async httpx.
-    Returns None on any network / timeout error so the caller can fall back.
-    """
-    params = {
-        "latitude":  f"{latitude:.6f}",
-        "longitude": f"{longitude:.6f}",
-        "start_date": f"{start_year}-01-01",
-        "end_date":   f"{end_year}-12-31",
-        "daily":      "precipitation_sum",
-        "timezone":   "auto",
-        "models":     "era5",
-        "precipitation_unit": "mm",
-    }
-    try:
-        resp = await client.get(OPEN_METEO_ARCHIVE_URL, params=params)
-        if resp.status_code != 200:
-            logger.warning("Open-Meteo returned HTTP %d for (%.4f, %.4f)", resp.status_code, latitude, longitude)
-            return None
-        return resp.json()
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        logger.warning("Open-Meteo request failed for (%.4f, %.4f): %s", latitude, longitude, type(exc).__name__)
-        return None
-
-
-async def fetch_historical_rainfall_for_points_async(
+def fetch_historical_rainfall_for_points(
     locations: list[tuple[float, float]], years: int = 10
 ) -> list[dict[str, Any]]:
-    """
-    Async version — fetches ERA5 rainfall concurrently for all pond candidate locations.
-    Falls back to IMD regional climate normals per-location on network failure.
-    Your original aggregation logic is fully preserved.
-    """
     if not locations:
         raise ValueError("At least one rainfall location is required.")
     if len(locations) > 12:
@@ -99,39 +62,76 @@ async def fetch_historical_rainfall_for_points_async(
     if not 1 <= years <= MAX_RAINFALL_YEARS:
         raise ValueError(f"Rainfall history must be between 1 and {MAX_RAINFALL_YEARS} years.")
 
-    end_year   = date.today().year - 1
+    end_year = date.today().year - 1
     start_year = end_year - years + 1
-
+    params = {
+        "latitude": ",".join(f"{latitude:.6f}" for latitude, _ in locations),
+        "longitude": ",".join(f"{longitude:.6f}" for _, longitude in locations),
+        "start_date": f"{start_year}-01-01",
+        "end_date": f"{end_year}-12-31",
+        "daily": "precipitation_sum",
+        "timezone": "auto",
+        "models": "era5",
+        "precipitation_unit": "mm",
+    }
     logger.info(
         "Precipitation request started: model=ERA5 period=%d-%d candidate_points=%d",
-        start_year, end_year, len(locations),
+        start_year,
+        end_year,
+        len(locations),
     )
+    max_attempts = 3
+    retry_delay_s = 2.0
+    payload = None
 
-    # Fetch all locations concurrently with a shared async httpx client (12-second timeout)
-    async with httpx.AsyncClient(timeout=12.0) as client:
-        import asyncio
-        raw_payloads = await asyncio.gather(*[
-            _fetch_single_location_async(client, lat, lon, start_year, end_year)
-            for lat, lon in locations
-        ])
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=(30, 90))
+            if response.status_code != 200:
+                logger.warning("Rainfall provider returned HTTP %d", response.status_code)
+                if response.status_code == 429:
+                    raise ValueError("Rainfall provider returned HTTP 429.")
+                raise ValueError(f"Rainfall provider returned HTTP {response.status_code}.")
+            payload = response.json()
+            break
+        except requests.Timeout:
+            if attempt < max_attempts:
+                logger.warning(
+                    "Rainfall request timed out (attempt %d/%d) — retrying in %.0f s",
+                    attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.warning("Rainfall request timed out — using IMD regional fallback")
+                return [_imd_fallback(lat, lon) for lat, lon in locations]
+        except requests.RequestException as exc:
+            if attempt < max_attempts:
+                logger.warning(
+                    "Rainfall network request failed: %s (attempt %d/%d) — retrying in %.0f s",
+                    type(exc).__name__, attempt, max_attempts, retry_delay_s,
+                )
+                time.sleep(retry_delay_s)
+            else:
+                logger.warning("Rainfall network request failed — using IMD regional fallback")
+                return [_imd_fallback(lat, lon) for lat, lon in locations]
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error("Rainfall response could not be decoded: %s", type(exc).__name__)
+            raise ValueError("The rainfall service returned an unreadable response.") from exc
 
-    results: list[dict[str, Any]] = []
-    for (latitude, longitude), payload in zip(locations, raw_payloads):
-        # ── Fall back to IMD normals if API failed ──────────────────────────
-        if payload is None:
-            logger.warning(
-                "Using IMD fallback for (%.4f, %.4f) — Open-Meteo unreachable", latitude, longitude
-            )
-            results.append(_imd_fallback(latitude, longitude))
-            continue
+    payloads = payload if isinstance(payload, list) else [payload]
+    if len(payloads) != len(locations):
+        raise ValueError("The rainfall service returned a different number of locations than requested.")
 
-        # ── Your original per-location aggregation logic ────────────────────
-        daily = payload.get("daily", {})
+    results = []
+    for location, location_payload in zip(locations, payloads):
+        latitude, longitude = location
+        daily = location_payload.get("daily", {})
         dates = daily.get("time", [])
         rain_values = daily.get("precipitation_sum", [])
-
         if len(dates) != len(rain_values) or not dates:
-            logger.warning("Open-Meteo returned empty series for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
+            logger.warning("Rainfall series empty for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
             results.append(_imd_fallback(latitude, longitude))
             continue
 
@@ -139,7 +139,6 @@ async def fetch_historical_rainfall_for_points_async(
         annual_valid_days: dict[int, int] = defaultdict(int)
         monthly_totals: dict[tuple[int, int], float] = defaultdict(float)
         monthly_valid_days: dict[tuple[int, int], int] = defaultdict(int)
-
         for day_text, precipitation_value in zip(dates, rain_values):
             if precipitation_value is None:
                 continue
@@ -156,65 +155,56 @@ async def fetch_historical_rainfall_for_points_async(
             monthly_valid_days[(day.year, day.month)] += 1
 
         complete_years = [
-            year for year in range(start_year, end_year + 1)
+            year
+            for year in range(start_year, end_year + 1)
             if annual_valid_days[year] >= (366 if _is_leap_year(year) else 365) - 3
         ]
-
         if not complete_years:
-            logger.warning("No complete years in ERA5 data for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
+            logger.warning("No complete years in rainfall data for (%.4f, %.4f) — using IMD fallback", latitude, longitude)
             results.append(_imd_fallback(latitude, longitude))
             continue
 
         annual_precipitation = {str(year): round(annual_totals[year] / 1000.0, 4) for year in complete_years}
         monthly_mean = []
         for month in range(1, 13):
-            year_totals_list = [
+            year_totals = [
                 monthly_totals[(year, month)]
                 for year in complete_years
                 if monthly_valid_days[(year, month)] >= 27
             ]
-            monthly_mean.append(
-                round(sum(year_totals_list) / len(year_totals_list) / 1000.0, 4)
-                if year_totals_list else 0.0
-            )
-
-        result: dict[str, Any] = {
+            monthly_mean.append(round(sum(year_totals) / len(year_totals) / 1000.0, 4) if year_totals else 0.0)
+        result = {
             "source": "Open-Meteo Historical Weather API",
             "model": "ERA5",
             "gridResolutionKm": 25,
             "periodStart": f"{complete_years[0]}-01-01",
-            "periodEnd":   f"{complete_years[-1]}-12-31",
+            "periodEnd": f"{complete_years[-1]}-12-31",
             "yearsIncluded": complete_years,
             "annualPrecipitationM": annual_precipitation,
             "meanAnnualPrecipitationM": round(
-                sum(annual_totals[year] for year in complete_years) / len(complete_years) / 1000.0, 4
+                sum(annual_totals[year] for year in complete_years) / len(complete_years) / 1000.0,
+                4,
             ),
             "meanMonthlyPrecipitationM": monthly_mean,
             "gridCell": {
-                "latitude":  payload.get("latitude", latitude),
-                "longitude": payload.get("longitude", longitude),
+                "latitude": location_payload.get("latitude", latitude),
+                "longitude": location_payload.get("longitude", longitude),
             },
         }
         results.append(result)
         logger.info(
             "Precipitation summary: years=%d mean_annual=%.4f m grid_cell=(%.5f, %.5f)",
-            len(complete_years), result["meanAnnualPrecipitationM"],
-            result["gridCell"]["latitude"], result["gridCell"]["longitude"],
+            len(complete_years),
+            result["meanAnnualPrecipitationM"],
+            result["gridCell"]["latitude"],
+            result["gridCell"]["longitude"],
         )
 
     logger.info("Precipitation request complete: candidate_points=%d", len(results))
     return results
 
 
-def fetch_historical_rainfall_for_points(
-    locations: list[tuple[float, float]], years: int = 10
-) -> list[dict[str, Any]]:
-    """
-    Synchronous wrapper kept for backward compatibility (tests, legacy endpoints).
-    Delegates to the async implementation via a new event loop.
-    """
-    import asyncio
-    return asyncio.run(fetch_historical_rainfall_for_points_async(locations, years))
+fetch_historical_rainfall_for_points_async = fetch_historical_rainfall_for_points
 
 
 def _is_leap_year(year: int) -> bool:
