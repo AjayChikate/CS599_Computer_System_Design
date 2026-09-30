@@ -165,30 +165,32 @@ async def api_search_village(q: str = "") -> JSONResponse:
         return JSONResponse(status_code=200, content=[])
 
     try:
+        import asyncio
         import httpx
         url = "https://nominatim.openstreetmap.org/search"
         headers = {"User-Agent": "PondCatchmentAnalysis/1.0 (village-siting-system)"}
 
-        # Search specifically with village designation as well as raw query
+        # Search concurrently with village designation and raw query
         q_village = query if "village" in query.lower() else f"{query} village"
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp1 = await client.get(url, params={
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp1_task = client.get(url, params={
                 "q": q_village,
                 "format": "jsonv2",
                 "countrycodes": "in",
                 "addressdetails": 1,
                 "limit": 10,
             }, headers=headers)
-            resp2 = await client.get(url, params={
+            resp2_task = client.get(url, params={
                 "q": query,
                 "format": "jsonv2",
                 "countrycodes": "in",
                 "addressdetails": 1,
                 "limit": 8,
             }, headers=headers)
+            resp1, resp2 = await asyncio.gather(resp1_task, resp2_task, return_exceptions=True)
 
-        items1 = resp1.json() if resp1.status_code == 200 else []
-        items2 = resp2.json() if resp2.status_code == 200 else []
+        items1 = resp1.json() if not isinstance(resp1, Exception) and resp1.status_code == 200 else []
+        items2 = resp2.json() if not isinstance(resp2, Exception) and resp2.status_code == 200 else []
 
         combined = []
         seen = set()

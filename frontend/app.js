@@ -276,7 +276,8 @@ function setAnalyzeEnabled(enabled) {
 }
 
 function showClearBtn(show) {
-  document.getElementById("btn-clear-selection").classList.toggle("hidden", !show);
+  const btn = document.getElementById("btn-clear-selection");
+  if (btn) btn.classList.remove("hidden");
 }
 
 function setStatus(msg, type = "info", spinner = true) {
@@ -336,14 +337,8 @@ function switchMode(mode) {
 }
 
 function clearPolygon() {
-  drawnItems.clearLayers();
-  state.drawnLayer = null;
-  state.polygon = null;
-  state.areaKm2 = null;
-  updateAreaFeedback(null);
-  setAnalyzeEnabled(canAnalyze());
-  showClearBtn(false);
-  clearStatus();
+  setStatus("Resetting application...", "info", true);
+  window.location.reload();
 }
 
 // ---------------------------------------------------------------------------
@@ -877,8 +872,12 @@ function initVillageSearch() {
   if (!input || !list) return;
 
   let debounceTimer = null;
+  let activeSearchController = null;
 
   async function fetchSuggestions(query) {
+    if (activeSearchController) {
+      activeSearchController.abort();
+    }
     if (!query || query.length < 2) {
       list.classList.add("hidden");
       list.innerHTML = "";
@@ -887,9 +886,12 @@ function initVillageSearch() {
       return;
     }
 
+    activeSearchController = new AbortController();
     if (spinner) spinner.classList.remove("hidden");
     try {
-      const res = await fetch(`/api/searchVillage?q=${encodeURIComponent(query)}`);
+      const res = await fetch(`/api/searchVillage?q=${encodeURIComponent(query)}`, {
+        signal: activeSearchController.signal,
+      });
       if (!res.ok) throw new Error("Search failed");
       const suggestions = await res.json();
       state.currentSuggestions = suggestions || [];
@@ -908,6 +910,7 @@ function initVillageSearch() {
         list.classList.remove("hidden");
       }
     } catch (err) {
+      if (err.name === "AbortError") return;
       console.debug("Village search error:", err);
       list.classList.add("hidden");
     } finally {
@@ -920,7 +923,7 @@ function initVillageSearch() {
     const query = input.value.trim();
     debounceTimer = setTimeout(() => {
       fetchSuggestions(query);
-    }, 250);
+    }, 200);
   });
 
   input.addEventListener("keydown", (e) => {
@@ -979,10 +982,10 @@ function selectVillage(village) {
   if (input) input.value = village.name;
   if (list) list.classList.add("hidden");
 
-  // Smooth real-time flyTo on Leaflet map
+  // Smooth real-time flyTo on Leaflet map (snappy 0.8s)
   map.flyTo([village.lat, village.lon], 15, {
     animate: true,
-    duration: 1.5,
+    duration: 0.8,
   });
 
   // Highlight village location with Leaflet marker
