@@ -47,6 +47,47 @@ Start the API separately when needed:
 uvicorn backend.app:app --host 0.0.0.0 --port 8000
 ```
 
+## OpenTelemetry observability
+
+The FastAPI service is instrumented with OpenTelemetry for distributed traces,
+application logs, and metrics. The browser UI's API calls are represented as
+server request spans. Pond DEM, contour, and rainfall operations add named spans
+and useful attributes; outbound provider URLs are not captured, so API keys and
+query strings are not included in telemetry. HTTP request counts/durations and
+successful pond-analysis/candidate counts are exported as metrics. Existing
+Python application logs are also forwarded through the OpenTelemetry logging
+bridge.
+
+Install the additions from `requirements.txt`, then run the app as usual. With
+no OTLP endpoint configured, traces, logs, and metrics are written to the API
+terminal (metrics are emitted every five seconds). This console mode is useful
+for a quick local check.
+
+To inspect all three signals in Grafana, start the Grafana LGTM OpenTelemetry
+backend in a second PowerShell window:
+
+```powershell
+docker run --rm --name pond-otel -p 3000:3000 -p 4317:4317 -p 4318:4318 grafana/otel-lgtm:latest
+```
+
+Then, in the PowerShell window where the API will be started, select the OTLP
+HTTP exporter and launch the service:
+
+```powershell
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318"
+uvicorn backend.app:app --host 0.0.0.0 --port 8000
+```
+
+Open Grafana at `http://localhost:3000` and use its Explore view to inspect
+Tempo traces, Loki logs, and Prometheus metrics. Remove the endpoint variable
+from that PowerShell session to return to console-exporter mode. Do not add
+credentials or sensitive request data to span attributes.
+
+For an easy telemetry demonstration, start the app, open the local pond planner,
+and run an analysis using the included `contours_1m.kml` file or draw a small
+area. Exercise the rainfall action if using the map flow. The app will generate
+HTTP request data and domain-specific telemetry from those real operations.
+
 Run tests:
 
 ```powershell
@@ -61,6 +102,7 @@ python -m pytest -q
 - Runoff assumes a fixed 0.20 coefficient and omits site-specific infiltration, evaporation, soil/land-cover calibration, conveyance loss, and operating rules. Annual fillable water is an estimate, not a guaranteed yield.
 - Outputs are preliminary screening estimates, not construction or safety design recommendations.
 - Backend progress logs appear in the terminal running Streamlit/Uvicorn. Logs include request bounds, provider status, raster/contour counts, and analysis status; API keys are not logged.
+- OpenTelemetry data can be reviewed in the terminal's console-exporter output or in Grafana's Explore view when the OTLP backend is enabled.
 
 ## API endpoints
 

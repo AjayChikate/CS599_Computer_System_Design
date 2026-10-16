@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, List
 
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 
 class _StreamlitNoiseFilter(logging.Filter):
@@ -32,8 +34,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logging.getLogger("backend").setLevel(logging.INFO)
-from starlette.concurrency import run_in_threadpool
-
 logging.getLogger("uvicorn.access").addFilter(_StreamlitNoiseFilter())
 logger = logging.getLogger(__name__)
 
@@ -42,11 +42,13 @@ try:
     from .service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
     from .opentopography import DATASET_RESOLUTIONS, MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
     from .rainfall import fetch_historical_rainfall_for_points
+    from .telemetry import configure_telemetry, elapsed_seconds, get_tracer, record_analysis, record_http_request
 except ImportError:
     from config import MAX_UPLOAD_BYTES
     from service import analyze_contour_map, analyze_contours_in_area, load_raw_contours
     from opentopography import DATASET_RESOLUTIONS, MAX_AREA_KM2, _TILE_KM2, analyze_dem_area
     from rainfall import fetch_historical_rainfall_for_points
+    from telemetry import configure_telemetry, elapsed_seconds, get_tracer, record_analysis, record_http_request
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -54,6 +56,8 @@ app = FastAPI(
     title="Pond Catchment Analysis API",
     description="Geospatial terrain hydrology and rainfall analysis for village pond siting.",
 )
+configure_telemetry(app)
+tracer = get_tracer(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +65,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def collect_request_metrics(request, call_next):
+    started_at = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_name = getattr(route, "path", request.url.path)
+        record_http_request(
+            request.method,
+            route_name,
+            status_code,
+            elapsed_seconds(started_at),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +276,14 @@ async def api_search_village(q: str = "") -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 async def _run_analysis(contour_map: UploadFile | None, file: UploadFile | None = None) -> dict[str, Any]:
-    contents, filename = await _read_upload(contour_map, file)
-    return analyze_contour_map(contents, filename)
+    with tracer.start_as_current_span("pond.contour.analysis") as span:
+        contents, filename = await _read_upload(contour_map, file)
+        span.set_attribute("pond.contour.file_extension", Path(filename).suffix.lower())
+        analysis = analyze_contour_map(contents, filename)
+        candidate_count = len(analysis.get("pondCandidates", []))
+        span.set_attribute("pond.analysis.candidate_count", candidate_count)
+        record_analysis("contour", candidate_count)
+        return analysis
 
 
 @app.post("/analyzeContour")
@@ -356,9 +385,16 @@ async def api_analyze_dem_area(request: DemAnalysisRequest) -> JSONResponse:
             "DEM area API request: dataset=%s res=%.1fm polygon_vertices=%d",
             request.dataset, request.resolution_m, len(polygon),
         )
-        kml_bytes, result = await run_in_threadpool(
-            analyze_dem_area, polygon, request.dataset, request.resolution_m
-        )
+        with tracer.start_as_current_span("pond.dem.analysis") as span:
+            span.set_attribute("pond.dem.dataset", request.dataset)
+            span.set_attribute("pond.dem.resolution_m", request.resolution_m)
+            span.set_attribute("pond.dem.polygon_vertices", len(polygon))
+            kml_bytes, result = await run_in_threadpool(
+                analyze_dem_area, polygon, request.dataset, request.resolution_m
+            )
+            candidate_count = len(result.get("pondCandidates", []))
+            span.set_attribute("pond.analysis.candidate_count", candidate_count)
+            record_analysis("dem", candidate_count)
         logger.info(
             "DEM area API completed: status=%s candidates=%d kml_bytes=%d",
             result.get("status"), len(result.get("pondCandidates", [])), len(kml_bytes),
@@ -393,7 +429,11 @@ async def api_fetch_rainfall(request: RainfallRequest) -> JSONResponse:
         logger.info(
             "Rainfall API request: points=%d years=%d", len(locations), request.years,
         )
-        series = await run_in_threadpool(fetch_historical_rainfall_for_points, locations, request.years)
+        with tracer.start_as_current_span("pond.rainfall.fetch") as span:
+            span.set_attribute("pond.rainfall.location_count", len(locations))
+            span.set_attribute("pond.rainfall.years", request.years)
+            series = await run_in_threadpool(fetch_historical_rainfall_for_points, locations, request.years)
+            span.set_attribute("pond.rainfall.series_count", len(series))
         logger.info("Rainfall API completed: returned %d series", len(series))
         return JSONResponse(status_code=200, content=series)
     except ValueError as exc:
@@ -428,7 +468,12 @@ async def api_analyze_contour_with_area(
             "Contour+area API request: filename=%s bytes=%d polygon_vertices=%d loaded_contours=%d",
             filename, len(contents), len(area), len(raw_contours),
         )
-        result = analyze_contours_in_area(raw_contours, area)
+        with tracer.start_as_current_span("pond.contour.area_analysis") as span:
+            span.set_attribute("pond.contour.input_count", len(raw_contours))
+            result = analyze_contours_in_area(raw_contours, area)
+            candidate_count = len(result.get("pondCandidates", []))
+            span.set_attribute("pond.analysis.candidate_count", candidate_count)
+            record_analysis("contour_area", candidate_count)
         logger.info(
             "Contour+area API completed: status=%s candidates=%d",
             result.get("status"), len(result.get("pondCandidates", [])),
